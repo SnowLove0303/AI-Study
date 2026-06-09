@@ -1,0 +1,99 @@
+import type { MindElixirInstance, MindElixirData } from './index';
+import * as nodeOperation from './nodeOperation';
+import * as arrow from './arrow';
+import * as summary from './summary';
+export type OperationMap = typeof nodeOperation;
+export type Operations = keyof OperationMap;
+export type MindElixirMethods = typeof methods;
+/**
+ * Methods that mind-elixir instance can use
+ *
+ * @public
+ */
+declare const methods: {
+    init(this: MindElixirInstance, data: MindElixirData): Error | undefined;
+    destroy(this: Partial<MindElixirInstance>): void;
+    /**
+     * @public
+     * @param {boolean} enable
+     */
+    enableMobileMultiSelect(this: MindElixirInstance, enable: boolean): void;
+    exportSvg: (this: MindElixirInstance, noForeignObject?: boolean, injectCss?: string) => Blob;
+    exportPng: (this: MindElixirInstance, noForeignObject?: boolean, injectCss?: string) => Promise<Blob | null>;
+    createSummary: (this: MindElixirInstance, options?: summary.SummaryOptions) => void;
+    createSummaryFrom: (this: MindElixirInstance, summary: Omit<summary.Summary, "id">) => void;
+    removeSummary: (this: MindElixirInstance, id: string) => void;
+    selectSummary: (this: MindElixirInstance, el: import("./docs").SummarySvg) => void;
+    unselectSummary: (this: MindElixirInstance) => void;
+    renderSummary: (this: MindElixirInstance) => void;
+    editSummary: (this: MindElixirInstance, el: import("./docs").SummarySvg) => void;
+    renderArrow(this: MindElixirInstance): void;
+    editArrowLabel(this: MindElixirInstance, el: import("./docs").ArrowSvg): void;
+    tidyArrow(this: MindElixirInstance): void;
+    createArrow: (this: MindElixirInstance, from: import("./docs").Topic, to: import("./docs").Topic, options?: arrow.ArrowOptions) => void;
+    createArrowFrom: (this: MindElixirInstance, arrow: Omit<arrow.Arrow, "id">) => void;
+    removeArrow: (this: MindElixirInstance, linkSvg?: import("./docs").ArrowSvg) => void;
+    selectArrow: (this: MindElixirInstance, link: import("./docs").ArrowSvg) => void;
+    unselectArrow: (this: MindElixirInstance) => void;
+    moveNodeIn: (this: MindElixirInstance, from: import("./docs").Topic[], to: import("./docs").Topic) => Promise<void>;
+    moveDownNode: (this: MindElixirInstance, el?: import("./docs").Topic | undefined) => Promise<void>;
+    moveUpNode: (this: MindElixirInstance, el?: import("./docs").Topic | undefined) => Promise<void>;
+    copyNode: (this: MindElixirInstance, node: import("./docs").Topic, to: import("./docs").Topic) => Promise<void>;
+    addChild: (this: MindElixirInstance, el?: import("./docs").Topic | undefined, node?: import("./types").NodeObj<unknown> | undefined) => Promise<void>;
+    insertParent: (this: MindElixirInstance, el?: import("./docs").Topic | undefined, node?: import("./types").NodeObj<unknown> | undefined) => Promise<void>;
+    beginEdit: (this: MindElixirInstance, el?: import("./docs").Topic | undefined) => Promise<void>;
+    insertSibling: (this: MindElixirInstance, type: "before" | "after", el?: import("./docs").Topic | undefined, node?: import("./types").NodeObj<unknown> | undefined) => Promise<void>;
+    reshapeNode: (this: MindElixirInstance, tpc: import("./docs").Topic, patchData: Partial<import("./types").NodeObj<unknown>>) => Promise<void>;
+    moveNodeAfter: (this: MindElixirInstance, from: import("./docs").Topic[], to: import("./docs").Topic) => Promise<void>;
+    moveNodeBefore: (this: MindElixirInstance, from: import("./docs").Topic[], to: import("./docs").Topic) => Promise<void>;
+    removeNodes: (this: MindElixirInstance, tpcs: import("./docs").Topic[]) => Promise<void>;
+    copyNodes: (this: MindElixirInstance, tpcs: import("./docs").Topic[], to: import("./docs").Topic) => Promise<void>;
+    rmSubline: (this: MindElixirInstance, tpc: import("./docs").Topic) => Promise<void>;
+    setNodeTopic: (this: MindElixirInstance, el: import("./docs").Topic, topic: string) => Promise<void>;
+    scrollIntoView: (this: MindElixirInstance, el: HTMLElement, forceCenter?: boolean) => void;
+    selectNode: (this: MindElixirInstance, tpc: import("./docs").Topic, isNewNode?: boolean, e?: MouseEvent) => void;
+    selectNodes: (this: MindElixirInstance, tpcs: import("./docs").Topic[]) => void;
+    unselectNodes: (this: MindElixirInstance, tpcs: import("./docs").Topic[]) => void;
+    clearSelection: (this: MindElixirInstance) => void;
+    stringifyData: (data: object) => string;
+    getDataString: (this: MindElixirInstance) => string;
+    getData: (this: MindElixirInstance) => MindElixirData;
+    enableEdit: (this: MindElixirInstance) => void;
+    disableEdit: (this: MindElixirInstance) => void;
+    scale: (this: MindElixirInstance, scaleVal: number, offset?: {
+        x: number;
+        y: number;
+    }) => void;
+    scaleFit: (this: MindElixirInstance) => void;
+    move: (this: MindElixirInstance, dx: number, dy: number, smooth?: boolean) => void;
+    toCenter: (this: MindElixirInstance) => void;
+    install: (this: MindElixirInstance, plugin: (instance: MindElixirInstance) => void) => void;
+    focusNode: (this: MindElixirInstance, el: import("./docs").Topic) => void;
+    cancelFocus: (this: MindElixirInstance) => void;
+    initLeft: (this: MindElixirInstance) => void;
+    initRight: (this: MindElixirInstance) => void;
+    initSide: (this: MindElixirInstance) => void;
+    expandNode: (this: MindElixirInstance, el: import("./docs").Topic, isExpand?: boolean) => void;
+    expandNodeAll: (this: MindElixirInstance, el: import("./docs").Topic, isExpand?: boolean) => void;
+    refresh: (this: MindElixirInstance, data?: MindElixirData) => void;
+    getObjById: (id: string, data: import("./types").NodeObj) => import("./types").NodeObj | null;
+    generateNewObj: (this: MindElixirInstance) => import("./types").NodeObjExport;
+    layout: (this: MindElixirInstance) => void;
+    linkDiv: (this: MindElixirInstance, mainNode?: import("./docs").Wrapper) => void;
+    editTopic: (this: MindElixirInstance, el: import("./docs").Topic) => void;
+    createWrapper: (this: MindElixirInstance, nodeObj: import("./types").NodeObj, omitChildren?: boolean) => {
+        grp: import("./docs").Wrapper;
+        top: import("./docs").Parent;
+        tpc: import("./docs").Topic;
+    };
+    createParent: (this: MindElixirInstance, nodeObj: import("./types").NodeObj) => {
+        p: import("./docs").Parent;
+        tpc: import("./docs").Topic;
+    };
+    createChildren: (this: MindElixirInstance, wrappers: import("./docs").Wrapper[]) => import("./docs").Children;
+    createTopic: (this: MindElixirInstance, nodeObj: import("./types").NodeObj) => import("./docs").Topic;
+    findEle: (this: MindElixirInstance, id: string, el?: HTMLElement) => import("./docs").Topic;
+    changeTheme: (this: MindElixirInstance, theme: import("./types").Theme, shouldRefresh?: boolean) => void;
+    changeCompact: (this: MindElixirInstance, compact: boolean) => void;
+};
+export default methods;

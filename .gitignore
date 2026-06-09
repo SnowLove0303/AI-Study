@@ -12,8 +12,4 @@ Thumbs.db
 .vscode/
 .idea/
 
-# 忽略大文件（超过 GitHub 100MB 限制）
-node_modules/
-dist/
-dist-electron/
-release/
+# 保留所有文件（使用 Git LFS 管理大文件）
