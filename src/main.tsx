@@ -3,6 +3,10 @@ import { createRoot } from "react-dom/client";
 import MindElixir, { SIDE, type MindElixirData, type MindElixirInstance, type NodeObj } from "mind-elixir";
 import "mind-elixir/style.css";
 import {
+  AlignCenter,
+  AlignJustify,
+  AlignLeft,
+  AlignRight,
   Bell,
   BookOpen,
   Bold,
@@ -23,9 +27,13 @@ import {
   Hand,
   Highlighter,
   Home,
+  IndentDecrease,
+  IndentIncrease,
   Keyboard,
   LibraryBig,
   Link2,
+  List,
+  ListOrdered,
   LocateFixed,
   Maximize2,
   NotebookPen,
@@ -37,6 +45,7 @@ import {
   Plus,
   PlayCircle,
   Redo2,
+  RotateCcw,
   Rows3,
   Save,
   Search,
@@ -1744,10 +1753,14 @@ function KnowledgePanel({
 }) {
   const [draft, setDraft] = useState(value);
   const latestDraftRef = useRef(value);
+  const editorRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setDraft(value);
     latestDraftRef.current = value;
+    if (editorRef.current && editorRef.current.innerHTML !== value) {
+      editorRef.current.innerHTML = value || "";
+    }
   }, [nodeId, value]);
 
   useEffect(() => {
@@ -1766,6 +1779,17 @@ function KnowledgePanel({
     }
   };
 
+  const execCommand = (command: string, value?: string) => {
+    document.execCommand(command, false, value);
+    editorRef.current?.focus();
+  };
+
+  const handleInput = () => {
+    const content = editorRef.current?.innerHTML || "";
+    setDraft(content);
+    latestDraftRef.current = content;
+  };
+
   return (
     <section className="knowledge-panel" aria-label="知识点">
       <header className="knowledge-header">
@@ -1775,14 +1799,114 @@ function KnowledgePanel({
         </div>
         <small>自动保存</small>
       </header>
-      <textarea
-        value={draft}
+
+      <div className="knowledge-toolbar">
+        <div className="toolbar-group">
+          <button title="加粗 (Ctrl+B)" onClick={() => execCommand("bold")}>
+            <Bold size={16} />
+          </button>
+          <button title="斜体 (Ctrl+I)" onClick={() => execCommand("italic")}>
+            <em>I</em>
+          </button>
+          <button title="下划线 (Ctrl+U)" onClick={() => execCommand("underline")}>
+            <u>U</u>
+          </button>
+          <button title="删除线" onClick={() => execCommand("strikeThrough")}>
+            <s>S</s>
+          </button>
+        </div>
+
+        <div className="toolbar-divider" />
+
+        <div className="toolbar-group">
+          <select title="字体大小" onChange={(e) => execCommand("fontSize", e.target.value)}>
+            <option value="3">正常</option>
+            <option value="1">小</option>
+            <option value="2">较小</option>
+            <option value="4">较大</option>
+            <option value="5">大</option>
+            <option value="6">特大</option>
+            <option value="7">超大</option>
+          </select>
+        </div>
+
+        <div className="toolbar-divider" />
+
+        <div className="toolbar-group">
+          <label title="文字颜色" className="color-picker-label">
+            <Type size={14} />
+            <input
+              type="color"
+              defaultValue="#111827"
+              onChange={(e) => execCommand("foreColor", e.target.value)}
+            />
+          </label>
+          <label title="背景颜色" className="color-picker-label">
+            <PaintBucket size={14} />
+            <input
+              type="color"
+              defaultValue="#ffffff"
+              onChange={(e) => execCommand("hiliteColor", e.target.value)}
+            />
+          </label>
+        </div>
+
+        <div className="toolbar-divider" />
+
+        <div className="toolbar-group">
+          <button title="左对齐" onClick={() => execCommand("justifyLeft")}>
+            <AlignLeft size={16} />
+          </button>
+          <button title="居中" onClick={() => execCommand("justifyCenter")}>
+            <AlignCenter size={16} />
+          </button>
+          <button title="右对齐" onClick={() => execCommand("justifyRight")}>
+            <AlignRight size={16} />
+          </button>
+          <button title="两端对齐" onClick={() => execCommand("justifyFull")}>
+            <AlignJustify size={16} />
+          </button>
+        </div>
+
+        <div className="toolbar-divider" />
+
+        <div className="toolbar-group">
+          <button title="无序列表" onClick={() => execCommand("insertUnorderedList")}>
+            <List size={16} />
+          </button>
+          <button title="有序列表" onClick={() => execCommand("insertOrderedList")}>
+            <ListOrdered size={16} />
+          </button>
+        </div>
+
+        <div className="toolbar-divider" />
+
+        <div className="toolbar-group">
+          <button title="增加缩进" onClick={() => execCommand("indent")}>
+            <IndentIncrease size={16} />
+          </button>
+          <button title="减少缩进" onClick={() => execCommand("outdent")}>
+            <IndentDecrease size={16} />
+          </button>
+        </div>
+
+        <div className="toolbar-divider" />
+
+        <div className="toolbar-group">
+          <button title="清除格式" onClick={() => execCommand("removeFormat")}>
+            <RotateCcw size={16} />
+          </button>
+        </div>
+      </div>
+
+      <div
+        ref={editorRef}
+        className="knowledge-editor"
+        contentEditable
+        onInput={handleInput}
         onBlur={flushDraft}
-        onChange={(event) => {
-          latestDraftRef.current = event.target.value;
-          setDraft(event.target.value);
-        }}
-        placeholder="定义、重点、例子、易错点..."
+        data-placeholder="定义、重点、例子、易错点..."
+        suppressContentEditableWarning
       />
     </section>
   );

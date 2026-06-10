@@ -9,6 +9,23 @@ export type UpdateLogEntry = {
 
 export const updateLog: UpdateLogEntry[] = [
   {
+    version: "1.2.0",
+    date: "2026-06-10",
+    title: "知识点排版工具",
+    featureUpdates: [
+      "知识点编辑器升级为富文本编辑器",
+      "添加排版工具栏：加粗、斜体、下划线、删除线",
+      "添加字体大小选择：正常、小、较小、较大、大、特大、超大",
+      "添加文字颜色和背景颜色选择",
+      "添加对齐方式：左对齐、居中、右对齐、两端对齐",
+      "添加列表功能：无序列表、有序列表",
+      "添加缩进功能：增加缩进、减少缩进",
+      "添加清除格式功能"
+    ],
+    fixes: [],
+    optimizations: ["知识点编辑体验更接近 Word/WPS"]
+  },
+  {
     version: "1.1.0",
     date: "2026-06-09",
     title: "目录层级优化",

@@ -584,6 +584,154 @@ h1 {
   color: var(--ink-400);
 }
 
+.knowledge-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(248, 250, 252, 0.84);
+  flex-wrap: wrap;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.toolbar-group button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--ink-600);
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.toolbar-group button:hover {
+  color: var(--teal);
+  background: rgba(15, 118, 110, 0.08);
+  border-color: rgba(15, 118, 110, 0.16);
+}
+
+.toolbar-group button:active {
+  background: rgba(15, 118, 110, 0.12);
+}
+
+.toolbar-group select {
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  color: var(--ink-800);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.toolbar-group select:hover {
+  border-color: var(--teal);
+}
+
+.toolbar-divider {
+  width: 1px;
+  height: 24px;
+  background: var(--line);
+  margin: 0 4px;
+}
+
+.color-picker-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--ink-600);
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.15s;
+  position: relative;
+  overflow: hidden;
+}
+
+.color-picker-label:hover {
+  color: var(--teal);
+  background: rgba(15, 118, 110, 0.08);
+  border-color: rgba(15, 118, 110, 0.16);
+}
+
+.color-picker-label input[type="color"] {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.knowledge-editor {
+  width: 100%;
+  min-height: 300px;
+  padding: 22px;
+  border: 0;
+  outline: 0;
+  color: var(--ink-950);
+  background: transparent;
+  font-size: 16px;
+  line-height: 1.75;
+  overflow-y: auto;
+}
+
+.knowledge-editor:empty::before {
+  content: attr(data-placeholder);
+  color: var(--ink-400);
+  pointer-events: none;
+}
+
+.knowledge-editor:focus {
+  outline: none;
+}
+
+.knowledge-editor b, .knowledge-editor strong {
+  font-weight: 700;
+}
+
+.knowledge-editor i, .knowledge-editor em {
+  font-style: italic;
+}
+
+.knowledge-editor u {
+  text-decoration: underline;
+}
+
+.knowledge-editor s, .knowledge-editor strike {
+  text-decoration: line-through;
+}
+
+.knowledge-editor ul, .knowledge-editor ol {
+  margin: 8px 0;
+  padding-left: 24px;
+}
+
+.knowledge-editor ul {
+  list-style-type: disc;
+}
+
+.knowledge-editor ol {
+  list-style-type: decimal;
+}
+
+.knowledge-editor li {
+  margin: 4px 0;
+}
+
 .knowledge-notes-list {
   min-height: 0;
   overflow: auto;
