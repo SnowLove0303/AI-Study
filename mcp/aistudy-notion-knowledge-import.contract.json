@@ -1,0 +1,326 @@
+{
+  "name": "aistudy.notionKnowledgeImport",
+  "version": "1.2.0",
+  "purpose": "Import Notion course content into AIstudy knowledge points by matching Notion heading sections to mind-map node ids.",
+  "defaultUseCase": {
+    "notionUrl": "https://www.notion.so/374003b68bec81b9931ce094b9f4a2d1?v=369003b68bec80be889f000c82ce7650&source=copy_link",
+    "courseTitle": "金融市场基础知识",
+    "targetField": "course.knowledgePoints[nodeId]"
+  },
+  "uiEntry": {
+    "viewId": "mcp",
+    "section": "Notion 知识点导入",
+    "steps": ["规范", "接入", "执行"],
+    "cards": ["契约", "流程", "写入规范", "Notion", "课程库", "MySQL", "备份"]
+  },
+  "runtimeTargets": {
+    "courseJson": "%APPDATA%/aistudy/data/courses.json",
+    "courseJsonBackupPattern": "%APPDATA%/aistudy/data/courses.json.before-notion-import-YYYYMMDD-HHMMSS.bak",
+    "notionCache": "%APPDATA%/Notion/notion.db",
+    "mysqlConfig": "%APPDATA%/aistudy/data/mysql.json",
+    "mysqlTable": "courses.payload_json"
+  },
+  "inputSchema": {
+    "notionUrl": {
+      "type": "string",
+      "required": true,
+      "description": "Public Notion page URL, shared page URL, or database view URL."
+    },
+    "courseTitle": {
+      "type": "string",
+      "required": true,
+      "example": "金融市场基础知识"
+    },
+    "rootPath": {
+      "type": "string[]",
+      "required": false,
+      "description": "Optional mind-map path used to limit matching scope."
+    },
+    "dryRun": {
+      "type": "boolean",
+      "default": true
+    },
+    "overwritePolicy": {
+      "type": "replace | skip_existing",
+      "default": "replace"
+    }
+  },
+  "canonicalWorkflow": [
+    "check_standard",
+    "check_access",
+    "resolve_notion_source",
+    "extract_notion_blocks",
+    "normalize_heading_tree",
+    "load_aistudy_course",
+    "match_headings_to_nodes",
+    "dry_run_report",
+    "enforce_write_preflight",
+    "write_knowledge_points",
+    "backup_and_persist_json",
+    "sync_mysql_if_available",
+    "verify_import"
+  ],
+  "procedure": [
+    {
+      "name": "check_standard",
+      "goal": "Ensure the MCP program and guide exist before any import work.",
+      "inputs": ["mcp/aistudy-notion-knowledge-import.contract.json", "docs/mcp-notion-knowledge-import.md"],
+      "outputs": {
+        "contractReady": "boolean",
+        "guideReady": "boolean"
+      },
+      "failFast": true
+    },
+    {
+      "name": "check_access",
+      "goal": "Check whether Notion, courses.json, and MySQL are available.",
+      "outputs": {
+        "sourceReadable": "boolean",
+        "jsonDatabaseReady": "boolean",
+        "mysqlConnected": "boolean"
+      },
+      "rules": [
+        "Stop when courses.json is missing or unreadable.",
+        "Continue without MySQL only when JSON write is possible.",
+        "Never invent Notion content when the source is unreadable."
+      ]
+    },
+    {
+      "name": "resolve_notion_source",
+      "inputs": ["notionUrl"],
+      "outputs": {
+        "sourceKind": "public_page | local_cache | exported_markdown | exported_csv",
+        "pageId": "string | null",
+        "viewId": "string | null",
+        "readable": "boolean"
+      },
+      "rules": [
+        "Extract the Notion page id from the URL.",
+        "Extract the view id when the URL contains a database view.",
+        "Prefer public Notion read access, then local cache, then exported files."
+      ]
+    },
+    {
+      "name": "extract_notion_blocks",
+      "inputs": ["sourceKind", "pageId", "viewId"],
+      "outputs": {
+        "blocks": "Array<{id,type,title,plainText,children,order}>"
+      },
+      "rules": [
+        "Preserve source order.",
+        "Read from Notion only; never write to Notion.",
+        "Return an explicit empty-source error when no blocks are available."
+      ]
+    },
+    {
+      "name": "normalize_heading_tree",
+      "inputs": ["blocks"],
+      "outputs": {
+        "sections": "Array<{heading,normalizedHeading,level,contentBlocks,plainText,html}>"
+      },
+      "rules": [
+        "Treat header, sub_header, sub_sub_header, and header_4 as hierarchy anchors.",
+        "Treat text, list, callout children, and table rows as content under the nearest heading.",
+        "Strip numbering markers only for matching, not for stored content.",
+        "Drop empty sections."
+      ]
+    },
+    {
+      "name": "load_aistudy_course",
+      "inputs": ["courseTitle"],
+      "outputs": {
+        "courseFound": "boolean",
+        "courseId": "string",
+        "nodeIndex": "Array<{nodeId,topic,normalizedTopic,nodePath,depth}>"
+      },
+      "rules": [
+        "Find the course by exact title first.",
+        "Do not write to another course when the requested course is missing.",
+        "Index every mindMap node by id and path."
+      ]
+    },
+    {
+      "name": "match_headings_to_nodes",
+      "inputs": ["sections", "nodeIndex", "rootPath"],
+      "outputs": {
+        "matches": "Array<{sectionHeading,nodeId,nodePath,confidence,reason}>",
+        "unmatchedHeadings": "Array<{sectionHeading,reason}>",
+        "ambiguousHeadings": "Array<{sectionHeading,candidates}>"
+      },
+      "rules": [
+        "Prefer exact path match within rootPath.",
+        "Then match exact title under the same parent.",
+        "Then match normalized title by removing chapter numbers and bracketed markers.",
+        "Do not choose automatically when candidates are ambiguous.",
+        "Do not write unmatched headings."
+      ]
+    },
+    {
+      "name": "dry_run_report",
+      "inputs": ["matches", "unmatchedHeadings", "ambiguousHeadings"],
+      "outputs": {
+        "matchedCount": "number",
+        "unmatchedCount": "number",
+        "ambiguousCount": "number",
+        "safeToWrite": "boolean"
+      },
+      "rules": [
+        "safeToWrite is false when ambiguousCount is greater than 0.",
+        "Show sectionHeading, nodePath, and confidence for every match."
+      ]
+    },
+    {
+      "name": "enforce_write_preflight",
+      "inputs": ["dryRun", "safeToWrite", "matches", "ambiguousHeadings", "courseJson"],
+      "outputs": {
+        "writeAllowed": "boolean",
+        "blockedReasons": "string[]",
+        "requiredEvidence": "Array<dry_run_report | backup_path | node_id_match_table>"
+      },
+      "rules": [
+        "Block writing when dryRun is true.",
+        "Block writing when safeToWrite is false.",
+        "Block writing when matchedCount is 0.",
+        "Block writing when ambiguousHeadings is not empty.",
+        "Block writing when any match lacks nodeId, nodePath, confidence, or source heading.",
+        "Block writing when courses.json cannot be backed up.",
+        "Block writing when the target course cannot be found by exact title.",
+        "Require a node-id match table before any write."
+      ]
+    },
+    {
+      "name": "write_knowledge_points",
+      "inputs": ["matches", "overwritePolicy"],
+      "outputs": {
+        "knowledgePoints": "Record<nodeId, html>",
+        "writtenNodeIds": "string[]"
+      },
+      "rules": [
+        "Write by node id only.",
+        "Do not write by visible title alone.",
+        "Use paragraph HTML for text content.",
+        "Sanitize HTML to paragraph, list, bold, italic, underline, strike, and line-break tags.",
+        "Reject script, style, iframe, object, embed, form, event handler attributes, and javascript: URLs.",
+        "Reject empty HTML after sanitization.",
+        "Preserve unrelated course data and unrelated node knowledge.",
+        "When overwritePolicy is skip_existing, keep non-empty existing knowledge.",
+        "When overwritePolicy is replace, replace only matched node ids."
+      ]
+    },
+    {
+      "name": "backup_and_persist_json",
+      "inputs": ["courseJson", "updatedCourse"],
+      "outputs": {
+        "backupPath": "string",
+        "jsonWritten": "boolean"
+      },
+      "rules": [
+        "Close AIstudy before direct file writes.",
+        "Backup courses.json before writing.",
+        "Write JSON atomically by writing a temporary file and renaming it when possible.",
+        "Never partially rewrite the courses array.",
+        "Abort if the JSON parse check fails after writing the temporary file."
+      ]
+    },
+    {
+      "name": "sync_mysql_if_available",
+      "inputs": ["updatedCourse"],
+      "outputs": {
+        "mysqlConnected": "boolean",
+        "mysqlSynced": "boolean"
+      },
+      "rules": [
+        "Use MySQL only when configured and reachable.",
+        "Do not fail the JSON import only because MySQL is offline.",
+        "Report mysqlSynced=false when skipped."
+      ]
+    },
+    {
+      "name": "verify_import",
+      "inputs": ["courseTitle", "writtenNodeIds", "backupPath"],
+      "outputs": {
+        "courseFound": "boolean",
+        "sourceReadable": "boolean",
+        "writtenCount": "number",
+        "mysqlSynced": "boolean",
+        "sampleNodeChecks": "Array<{nodeId,nodePath,plainTextPreview}>",
+        "backupPath": "string"
+      },
+      "rules": [
+        "Verify at least three sample node ids after writing when writtenCount is at least three.",
+        "Verify every written node when writtenCount is less than three.",
+        "Verify MySQL payload length or row update when MySQL is configured.",
+        "Report the backup path."
+      ]
+    }
+  ],
+  "writeSafety": {
+    "mustBackupBeforeWrite": true,
+    "mustCloseAIstudyBeforeDirectFileWrite": true,
+    "mustDryRunBeforeWrite": true,
+    "mustPreserveUnrelatedCourses": true,
+    "mustPreserveUnrelatedKnowledgePoints": true,
+    "mustResolveAmbiguityBeforeWrite": true,
+    "mustWriteOnlyMatchedNodeIds": true,
+    "mustRejectUnsafeHtml": true,
+    "mustVerifyAfterWrite": true,
+    "mustSyncMysqlAfterJsonWriteWhenAvailable": true
+  },
+  "writeEnforcement": {
+    "hardStops": [
+      "contract_missing",
+      "guide_missing",
+      "notion_unreadable",
+      "course_json_missing",
+      "course_not_found",
+      "dry_run_not_completed",
+      "matched_count_zero",
+      "ambiguous_heading_exists",
+      "missing_node_id",
+      "backup_failed",
+      "unsafe_html_detected",
+      "post_write_verification_failed"
+    ],
+    "requiredBeforeWrite": [
+      "sourceReadable=true",
+      "courseFound=true",
+      "dryRun=false",
+      "safeToWrite=true",
+      "matchedCount>0",
+      "ambiguousCount=0",
+      "backupPath exists",
+      "every match has nodeId and nodePath"
+    ],
+    "allowedMutationSurface": [
+      "targetCourse.knowledgePoints[matchedNodeId]",
+      "targetCourse.updatedAt",
+      "courses.payload_json for the same target course when MySQL is reachable"
+    ],
+    "forbiddenMutationSurface": [
+      "other courses",
+      "targetCourse.mindMap",
+      "unmatched knowledgePoints",
+      "Notion source",
+      "global settings",
+      "UI code"
+    ]
+  },
+  "reportSchema": {
+    "courseFound": "boolean",
+    "sourceReadable": "boolean",
+    "matchedCount": "number",
+    "writtenCount": "number",
+    "writeAllowed": "boolean",
+    "blockedReasons": "string[]",
+    "unmatchedHeadings": "Array<string>",
+    "ambiguousHeadings": "Array<{heading,candidates}>",
+    "backupPath": "string",
+    "mysqlSynced": "boolean",
+    "sampleNodeChecks": "Array<{nodeId,nodePath,plainTextPreview}>"
+  },
+  "uiCopyPolicy": {
+    "noLargeFeatureExplanations": true,
+    "preferredText": "short labels, state text, concise empty states, clear actions",
+    "longGuidanceLocation": ["docs/mcp-notion-knowledge-import.md", "mcp/aistudy-notion-knowledge-import.contract.json"]
+  }
+}

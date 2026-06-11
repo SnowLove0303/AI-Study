@@ -39,6 +39,7 @@ import {
   NotebookPen,
   PaintBucket,
   PackageCheck,
+  Paintbrush,
   Palette,
   PanelLeft,
   PanelRight,
@@ -64,7 +65,7 @@ import {
 import { updateLog, type UpdateLogEntry } from "./updateLog";
 import "./styles.css";
 
-type ViewId = "dashboard" | "courses" | "plan" | "notes" | "practice" | "assistant" | "updates" | "settings";
+type ViewId = "dashboard" | "courses" | "plan" | "notes" | "practice" | "assistant" | "mcp" | "updates" | "settings";
 type Tone = "teal" | "amber" | "blue" | "rose";
 
 type Task = { title: string; meta: string; progress: number; tone: Tone };
@@ -78,6 +79,9 @@ type Course = {
   createdAt: string;
   mindMap: MindElixirData;
   knowledgePoints: Record<string, string>;
+  branchMindMaps?: Record<string, MindElixirData>;
+  syncNumberedOutline?: boolean;
+  numberedOutlineSnapshot?: OutlineItem[];
 };
 type OutlineItem = {
   id: string;
@@ -98,14 +102,55 @@ type NoteEntry = {
   isLeaf: boolean;
   order: number;
 };
+type KnowledgeFormatBrush = {
+  inlineStyles: Record<string, string>;
+  blockStyles: Record<string, string>;
+};
+type KnowledgeHistoryState = {
+  canUndo: boolean;
+  canRedo: boolean;
+};
 type CourseWorkspaceMode = "knowledge" | "notes" | "mindmap";
 type AppSettings = {
   mindMapArrowPan: boolean;
+};
+type McpNotionImportStatus = {
+  contractPath: string;
+  contractReady: boolean;
+  guidePath: string;
+  guideReady: boolean;
+  notionCachePath: string;
+  notionCacheReady: boolean;
+  jsonDatabasePath: string;
+  jsonDatabaseReady: boolean;
+  mysqlConnected: boolean;
+  latestBackupPath: string | null;
+  latestBackupReady: boolean;
 };
 
 const mascotUrl = `${import.meta.env.BASE_URL}mascot.png`;
 const coursesStorageKey = "aistudy:courses:v1";
 const settingsStorageKey = "aistudy:settings:v1";
+const courseSaveStatusEvent = "aistudy:course-save-status";
+const knowledgeFontFamilies = [
+  { label: "微软雅黑", value: "Microsoft YaHei" },
+  { label: "宋体", value: "SimSun" },
+  { label: "黑体", value: "SimHei" },
+  { label: "楷体", value: "KaiTi" },
+  { label: "Arial", value: "Arial" },
+  { label: "Times", value: "Times New Roman" }
+];
+const knowledgeFontSizes = ["12px", "14px", "16px", "18px", "20px", "22px", "24px", "28px", "32px", "36px"];
+const knowledgeHistoryLimit = 80;
+
+type CourseSaveStatus = "saving" | "saved" | "error";
+
+let pendingCourseSave: Course[] | null = null;
+let courseSaveInFlight = false;
+
+function emitCourseSaveStatus(status: CourseSaveStatus) {
+  window.dispatchEvent(new CustomEvent(courseSaveStatusEvent, { detail: status }));
+}
 const defaultSettings: AppSettings = {
   mindMapArrowPan: true
 };
@@ -125,6 +170,7 @@ const navItems: Array<{ id: ViewId; label: string; icon: typeof Home }> = [
   { id: "notes", label: "知识笔记", icon: NotebookPen },
   { id: "practice", label: "练习中心", icon: Target },
   { id: "assistant", label: "AI 助教", icon: Bot },
+  { id: "mcp", label: "MCP", icon: Braces },
   { id: "updates", label: "更新管理", icon: PackageCheck }
 ];
 
@@ -145,7 +191,10 @@ function createCourse(title: string, category: string, description: string): Cou
     progress: 0,
     createdAt: new Date().toISOString(),
     mindMap: createMindMap(title),
-    knowledgePoints: {}
+    knowledgePoints: {},
+    branchMindMaps: {},
+    syncNumberedOutline: true,
+    numberedOutlineSnapshot: []
   };
 }
 
@@ -154,16 +203,70 @@ function loadCourses(): Course[] {
     const raw = localStorage.getItem(coursesStorageKey);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as Course[];
-    return Array.isArray(parsed)
-      ? parsed.map((course) => ({ ...course, knowledgePoints: course.knowledgePoints ?? {} }))
-      : [];
+    return normalizeCourses(parsed);
   } catch {
     return [];
   }
 }
 
+function normalizeCourses(value: unknown): Course[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((course) => ({
+    ...course,
+    knowledgePoints: course.knowledgePoints ?? {},
+    branchMindMaps: course.branchMindMaps ?? {},
+    syncNumberedOutline: course.syncNumberedOutline ?? true,
+    numberedOutlineSnapshot: course.numberedOutlineSnapshot ?? buildOutline(course.mindMap)
+  })) as Course[];
+}
+
+function readPersistedCoursePayload(value: unknown): Course[] | null {
+  if (!value) return null;
+  if (Array.isArray(value)) return normalizeCourses(value);
+  if (typeof value === "object" && "courses" in value) {
+    return normalizeCourses((value as { courses?: unknown }).courses);
+  }
+  return null;
+}
+
+async function loadPersistedCourses(): Promise<Course[] | null> {
+  if (!window.aistudy?.courses) return null;
+  const payload = await window.aistudy.courses.load();
+  return readPersistedCoursePayload(payload);
+}
+
+async function drainCourseSaveQueue() {
+  if (courseSaveInFlight) return;
+  courseSaveInFlight = true;
+
+  while (pendingCourseSave) {
+    const coursesToSave = pendingCourseSave;
+    pendingCourseSave = null;
+    emitCourseSaveStatus("saving");
+
+    try {
+      await window.aistudy?.courses?.save(coursesToSave);
+      emitCourseSaveStatus("saved");
+    } catch (error) {
+      console.error("Failed to save course database", error);
+      emitCourseSaveStatus("error");
+    }
+  }
+
+  courseSaveInFlight = false;
+}
+
 function saveCourses(courses: Course[]) {
-  localStorage.setItem(coursesStorageKey, JSON.stringify(courses));
+  const snapshot = JSON.parse(JSON.stringify(courses)) as Course[];
+  localStorage.setItem(coursesStorageKey, JSON.stringify(snapshot));
+
+  if (!window.aistudy?.courses?.save) {
+    emitCourseSaveStatus("saved");
+    return;
+  }
+
+  pendingCourseSave = snapshot;
+  void drainCourseSaveQueue();
 }
 
 function loadSettings(): AppSettings {
@@ -252,6 +355,70 @@ function buildOutline(data: MindElixirData): OutlineItem[] {
   return items;
 }
 
+const outlineDirectoryFreezeDepth = 3;
+
+function applyNumberedOutlineSnapshot(nextOutline: OutlineItem[], snapshot: OutlineItem[]) {
+  const snapshotItems = new Map(snapshot.map((item) => [item.id, item]));
+  const frozenIds = new Set(
+    snapshot
+      .filter((item) => item.depth >= outlineDirectoryFreezeDepth)
+      .map((item) => item.id)
+  );
+
+  return nextOutline
+    .filter((item) => item.depth < outlineDirectoryFreezeDepth || frozenIds.has(item.id))
+    .map((item) => {
+      if (item.depth < outlineDirectoryFreezeDepth) return item;
+      const frozenItem = snapshotItems.get(item.id);
+      return frozenItem
+        ? { ...item, topic: frozenItem.topic, numbering: frozenItem.numbering }
+        : item;
+    });
+}
+
+function findMindMapNode(root: NodeObj, nodeId: string): NodeObj | null {
+  if (root.id === nodeId) return root;
+  for (const child of root.children ?? []) {
+    const match = findMindMapNode(child, nodeId);
+    if (match) return match;
+  }
+  return null;
+}
+
+function cloneMindData(data: MindElixirData): MindElixirData {
+  return JSON.parse(JSON.stringify(data)) as MindElixirData;
+}
+
+function createBranchMindMapFromNode(node: NodeObj): MindElixirData {
+  return {
+    nodeData: JSON.parse(JSON.stringify(node)) as NodeObj,
+    arrows: [],
+    summaries: [],
+    direction: SIDE
+  } as MindElixirData;
+}
+
+function renderBranchList(nodes: NodeObj[] | undefined): string {
+  if (!nodes || nodes.length === 0) return "";
+  return `<ul>${nodes
+    .map((node) => `<li><span>${escapeHtml(node.topic)}</span>${renderBranchList(node.children)}</li>`)
+    .join("")}</ul>`;
+}
+
+function renderKnowledgeBranchHtml(branch: NodeObj): string {
+  return [
+    '<section class="knowledge-branch-map" contenteditable="false">',
+    '<button class="branch-map-close" type="button" aria-label="Close branch mind map">&times;</button>',
+    '<div class="branch-map-heading">',
+    '<span>分支思维导图</span>',
+    `<strong>${escapeHtml(branch.topic)}</strong>`,
+    "</div>",
+    renderBranchList(branch.children) || '<p class="branch-map-empty">当前分支暂无子节点</p>',
+    "</section>",
+    "<p><br></p>"
+  ].join("");
+}
+
 function normalizeTag(tag: NonNullable<NodeObj["tags"]>[number]) {
   return typeof tag === "string" ? tag : tag.text;
 }
@@ -294,12 +461,52 @@ function App() {
   const [courses, setCourses] = useState<Course[]>(() => loadCourses());
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
+  const [courseStoreReady, setCourseStoreReady] = useState(false);
+  const [courseSaveStatus, setCourseSaveStatus] = useState<CourseSaveStatus>("saved");
   const latestCoursesRef = useRef(courses);
 
   useEffect(() => {
+    const handleSaveStatus = (event: Event) => {
+      setCourseSaveStatus((event as CustomEvent<CourseSaveStatus>).detail);
+    };
+
+    window.addEventListener(courseSaveStatusEvent, handleSaveStatus);
+    return () => window.removeEventListener(courseSaveStatusEvent, handleSaveStatus);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    loadPersistedCourses()
+      .then((persistedCourses) => {
+        if (cancelled) return;
+        const localCourses = loadCourses();
+
+        if (persistedCourses && persistedCourses.length > 0) {
+          latestCoursesRef.current = persistedCourses;
+          setCourses(persistedCourses);
+        } else if (localCourses.length > 0) {
+          latestCoursesRef.current = localCourses;
+          void window.aistudy?.courses?.save(localCourses);
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to load course database", error);
+      })
+      .finally(() => {
+        if (!cancelled) setCourseStoreReady(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     latestCoursesRef.current = courses;
+    if (!courseStoreReady) return;
     return scheduleIdleTask(() => saveCourses(courses), 650);
-  }, [courses]);
+  }, [courseStoreReady, courses]);
 
   useEffect(() => {
     const flushCourses = () => saveCourses(latestCoursesRef.current);
@@ -316,10 +523,17 @@ function App() {
     [courses, selectedCourseId]
   );
 
-  const updateCourse = useCallback((courseId: string, patch: Partial<Course>) => {
-    setCourses((current) =>
-      current.map((course) => (course.id === courseId ? { ...course, ...patch } : course))
-    );
+  const updateCourse = useCallback((courseId: string, patch: Partial<Course> | ((course: Course) => Partial<Course>)) => {
+    setCourses((current) => {
+      const nextCourses = current.map((course) =>
+        course.id === courseId
+          ? { ...course, ...(typeof patch === "function" ? patch(course) : patch) }
+          : course
+      );
+      latestCoursesRef.current = nextCourses;
+      saveCourses(nextCourses);
+      return nextCourses;
+    });
   }, []);
 
   return (
@@ -382,6 +596,8 @@ function App() {
                   : "课程中心"
                 : activeView === "updates"
                   ? "更新管理"
+                  : activeView === "mcp"
+                    ? "MCP"
                   : activeView === "settings"
                     ? "设置"
                   : "学习工作台"}
@@ -410,9 +626,12 @@ function App() {
             onBack={() => setSelectedCourseId(null)}
             onUpdateCourse={updateCourse}
             settings={settings}
+            saveStatus={courseSaveStatus}
           />
         ) : activeView === "updates" ? (
           <UpdateManager />
+        ) : activeView === "mcp" ? (
+          <McpPanel />
         ) : activeView === "settings" ? (
           <SettingsPanel
             settings={settings}
@@ -511,6 +730,123 @@ function SettingsPanel({
         </div>
       </article>
     </section>
+  );
+}
+
+function McpPanel() {
+  const [status, setStatus] = useState<McpNotionImportStatus | null>(null);
+  const [isChecking, setIsChecking] = useState(false);
+
+  const refreshStatus = useCallback(() => {
+    setIsChecking(true);
+    void window.aistudy?.mcp
+      ?.notionImportStatus()
+      .then((nextStatus) => setStatus(nextStatus as McpNotionImportStatus))
+      .catch(() => setStatus(null))
+      .finally(() => setIsChecking(false));
+  }, []);
+
+  useEffect(() => {
+    refreshStatus();
+  }, [refreshStatus]);
+
+  const standardReady = Boolean(status?.contractReady && status?.guideReady);
+  const accessReady = Boolean(status?.notionCacheReady && status?.jsonDatabaseReady && status?.mysqlConnected);
+  const executionReady = Boolean(status?.latestBackupReady);
+  const statusLabel = (ready: boolean) => (isChecking ? "检测中" : ready ? "就绪" : "待处理");
+
+  return (
+    <section className="mcp-page" aria-label="MCP">
+      <section className="mcp-header-panel">
+        <div>
+          <span>MCP</span>
+          <h2>模型上下文协议</h2>
+        </div>
+        <button className="primary-button" type="button" onClick={refreshStatus}>
+          <RotateCcw size={18} />
+          <span>{isChecking ? "检测中" : "重新检测"}</span>
+        </button>
+      </section>
+
+      <section className="mcp-guide">
+        <article className={standardReady ? "mcp-step ready" : "mcp-step"}>
+          <div className="mcp-card-icon">
+            <Braces size={20} />
+          </div>
+          <div>
+            <span>01</span>
+            <strong>规范</strong>
+          </div>
+          <b>{statusLabel(standardReady)}</b>
+        </article>
+
+        <article className={accessReady ? "mcp-step ready" : "mcp-step"}>
+          <div className="mcp-card-icon">
+            <Link2 size={20} />
+          </div>
+          <div>
+            <span>02</span>
+            <strong>接入</strong>
+          </div>
+          <b>{statusLabel(accessReady)}</b>
+        </article>
+
+        <article className={executionReady ? "mcp-step ready" : "mcp-step"}>
+          <div className="mcp-card-icon">
+            <CheckCircle2 size={20} />
+          </div>
+          <div>
+            <span>03</span>
+            <strong>执行</strong>
+          </div>
+          <b>{statusLabel(executionReady)}</b>
+        </article>
+      </section>
+
+      <section className="mcp-grid">
+        <McpStatusCard title="契约" value={status?.contractReady} meta="contract" />
+        <McpStatusCard title="流程" value={status?.guideReady} meta="guide" />
+        <McpStatusCard title="写入规范" value={standardReady} meta="gate" />
+        <McpStatusCard title="Notion" value={status?.notionCacheReady} meta="cache" />
+        <McpStatusCard title="课程库" value={status?.jsonDatabaseReady} meta="json" />
+        <McpStatusCard title="MySQL" value={status?.mysqlConnected} meta="sync" />
+        <McpStatusCard title="备份" value={status?.latestBackupReady} meta="backup" />
+      </section>
+
+      <section className="panel mcp-run-panel">
+        <div className="panel-heading">
+          <div>
+            <h3>Notion 知识点导入</h3>
+          </div>
+          <CheckCircle2 size={22} />
+        </div>
+        <div className="mcp-run-list">
+          <span>读取 Notion</span>
+          <ChevronRight size={16} />
+          <span>标题匹配</span>
+          <ChevronRight size={16} />
+          <span>写入知识点</span>
+          <ChevronRight size={16} />
+          <span>验证落库</span>
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function McpStatusCard({ title, value, meta }: { title: string; value?: boolean; meta: string }) {
+  const ready = Boolean(value);
+  return (
+    <article className={ready ? "mcp-card ready" : "mcp-card"}>
+      <div className="mcp-card-icon">
+        {ready ? <CheckCircle2 size={20} /> : <Clock3 size={20} />}
+      </div>
+      <div>
+        <span>{meta}</span>
+        <strong>{title}</strong>
+      </div>
+      <b>{ready ? "就绪" : "待处理"}</b>
+    </article>
   );
 }
 
@@ -637,18 +973,28 @@ function CourseCenter({
   onSelectCourse,
   onBack,
   onUpdateCourse,
-  settings
+  settings,
+  saveStatus
 }: {
   courses: Course[];
   selectedCourse: Course | null;
   onCreateCourse: (course: Course) => void;
   onSelectCourse: (courseId: string) => void;
   onBack: () => void;
-  onUpdateCourse: (courseId: string, patch: Partial<Course>) => void;
+  onUpdateCourse: (courseId: string, patch: Partial<Course> | ((course: Course) => Partial<Course>)) => void;
   settings: AppSettings;
+  saveStatus: CourseSaveStatus;
 }) {
   if (selectedCourse) {
-    return <CourseDetail course={selectedCourse} onBack={onBack} onUpdateCourse={onUpdateCourse} settings={settings} />;
+    return (
+      <CourseDetail
+        course={selectedCourse}
+        onBack={onBack}
+        onUpdateCourse={onUpdateCourse}
+        settings={settings}
+        saveStatus={saveStatus}
+      />
+    );
   }
 
   return (
@@ -785,16 +1131,24 @@ function CreateCoursePanel({ onCreateCourse }: { onCreateCourse: (course: Course
   );
 }
 
+function getCourseSaveStatusLabel(status: CourseSaveStatus) {
+  if (status === "saving") return "保存中";
+  if (status === "error") return "保存失败";
+  return "已保存";
+}
+
 function CourseDetail({
   course,
   onBack,
   onUpdateCourse,
-  settings
+  settings,
+  saveStatus
 }: {
   course: Course;
   onBack: () => void;
-  onUpdateCourse: (courseId: string, patch: Partial<Course>) => void;
+  onUpdateCourse: (courseId: string, patch: Partial<Course> | ((course: Course) => Partial<Course>)) => void;
   settings: AppSettings;
+  saveStatus: CourseSaveStatus;
 }) {
   const [workspaceMode, setWorkspaceMode] = useState<CourseWorkspaceMode>("knowledge");
 
@@ -808,10 +1162,10 @@ function CourseDetail({
         <div>
           <span className="course-category">{course.category || "未分类"}</span>
         </div>
-        <button className="secondary-button">
+        <div className={`auto-save-status ${saveStatus}`}>
           <Save size={18} />
-          <span>自动保存</span>
-        </button>
+          <span>{getCourseSaveStatusLabel(saveStatus)}</span>
+        </div>
       </section>
 
       <section className="mindmap-shell">
@@ -837,9 +1191,31 @@ function CourseDetail({
           data={course.mindMap}
           mode={workspaceMode}
           knowledgePoints={course.knowledgePoints ?? {}}
+          branchMindMaps={course.branchMindMaps ?? {}}
+          syncNumberedOutline={course.syncNumberedOutline ?? true}
+          numberedOutlineSnapshot={course.numberedOutlineSnapshot ?? buildOutline(course.mindMap)}
           onChange={(mindMap) => onUpdateCourse(course.id, { mindMap })}
-          onKnowledgeChange={(knowledgePoints) => onUpdateCourse(course.id, { knowledgePoints })}
+          onOutlineSyncStateChange={(syncNumberedOutline, numberedOutlineSnapshot) =>
+            onUpdateCourse(course.id, { syncNumberedOutline, numberedOutlineSnapshot })
+          }
+          onBranchMindMapChange={(nodeId, mindMap) =>
+            onUpdateCourse(course.id, (currentCourse) => ({
+              branchMindMaps: {
+                ...(currentCourse.branchMindMaps ?? {}),
+                [nodeId]: mindMap
+              }
+            }))
+          }
+          onKnowledgeChange={(nodeId, content) =>
+            onUpdateCourse(course.id, (currentCourse) => ({
+              knowledgePoints: {
+                ...(currentCourse.knowledgePoints ?? {}),
+                [nodeId]: content
+              }
+            }))
+          }
           settings={settings}
+          saveStatus={saveStatus}
         />
       </section>
     </>
@@ -852,18 +1228,30 @@ function MindMapEditor({
   data,
   mode,
   knowledgePoints,
+  branchMindMaps,
+  syncNumberedOutline: persistedSyncNumberedOutline,
+  numberedOutlineSnapshot: persistedNumberedOutlineSnapshot,
   onChange,
+  onOutlineSyncStateChange,
+  onBranchMindMapChange,
   onKnowledgeChange,
-  settings
+  settings,
+  saveStatus
 }: {
   courseId: string;
   title: string;
   data: MindElixirData;
   mode: CourseWorkspaceMode;
   knowledgePoints: Record<string, string>;
+  branchMindMaps: Record<string, MindElixirData>;
+  syncNumberedOutline: boolean;
+  numberedOutlineSnapshot: OutlineItem[];
   onChange: (data: MindElixirData) => void;
-  onKnowledgeChange: (knowledgePoints: Record<string, string>) => void;
+  onOutlineSyncStateChange: (syncNumberedOutline: boolean, numberedOutlineSnapshot: OutlineItem[]) => void;
+  onBranchMindMapChange: (nodeId: string, data: MindElixirData) => void;
+  onKnowledgeChange: (nodeId: string, content: string) => void;
   settings: AppSettings;
+  saveStatus: CourseSaveStatus;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const outlineListRef = useRef<HTMLDivElement | null>(null);
@@ -872,9 +1260,17 @@ function MindMapEditor({
   const canvasDragRef = useRef({ active: false, x: 0, y: 0 });
   const panControlRef = useRef({ x: panControlCenter, y: panControlCenter });
   const outlineResizeRef = useRef({ active: false, startX: 0, startWidth: 0 });
-  const [outline, setOutline] = useState<OutlineItem[]>(() => buildOutline(data));
+  const [outline, setOutline] = useState<OutlineItem[]>(() =>
+    persistedSyncNumberedOutline
+      ? buildOutline(data)
+      : applyNumberedOutlineSnapshot(buildOutline(data), persistedNumberedOutlineSnapshot)
+  );
   const [noteEntries, setNoteEntries] = useState<NoteEntry[]>(() => buildNoteEntries(data));
   const [compactMode, setCompactMode] = useState(false);
+  const [syncNumberedOutline, setSyncNumberedOutline] = useState(persistedSyncNumberedOutline);
+  const [upstreamBranchIsolation, setUpstreamBranchIsolation] = useState(false);
+  const [downstreamBranchIsolation, setDownstreamBranchIsolation] = useState(false);
+  const [mindFormatBrush, setMindFormatBrush] = useState<NonNullable<NodeObj["style"]> | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedPageId, setSelectedPageId] = useState(data.nodeData.id);
   const [selectedNodeCount, setSelectedNodeCount] = useState(1);
@@ -889,10 +1285,186 @@ function MindMapEditor({
   const [isOutlineResizing, setIsOutlineResizing] = useState(false);
 
   const onChangeRef = useRef(onChange);
+  const onOutlineSyncStateChangeRef = useRef(onOutlineSyncStateChange);
+  const onBranchMindMapChangeRef = useRef(onBranchMindMapChange);
+  const mainMindDataRef = useRef(data);
+  const branchMindMapsRef = useRef(branchMindMaps);
+  const selectedPageIdRef = useRef(data.nodeData.id);
+  const upstreamBranchIsolationRef = useRef(false);
+  const downstreamBranchIsolationRef = useRef(false);
+  const activeBranchCanvasIdRef = useRef<string | null>(null);
+  const syncNumberedOutlineRef = useRef(persistedSyncNumberedOutline);
+  const numberedOutlineSnapshotRef = useRef<OutlineItem[]>(
+    persistedNumberedOutlineSnapshot.length > 0 ? persistedNumberedOutlineSnapshot : buildOutline(data)
+  );
 
   useEffect(() => {
     onChangeRef.current = onChange;
   }, [onChange]);
+
+  useEffect(() => {
+    onOutlineSyncStateChangeRef.current = onOutlineSyncStateChange;
+  }, [onOutlineSyncStateChange]);
+
+  useEffect(() => {
+    onBranchMindMapChangeRef.current = onBranchMindMapChange;
+  }, [onBranchMindMapChange]);
+
+  useEffect(() => {
+    mainMindDataRef.current = data;
+  }, [data]);
+
+  useEffect(() => {
+    branchMindMapsRef.current = branchMindMaps;
+  }, [branchMindMaps]);
+
+  useEffect(() => {
+    selectedPageIdRef.current = selectedPageId;
+  }, [selectedPageId]);
+
+  useEffect(() => {
+    upstreamBranchIsolationRef.current = upstreamBranchIsolation;
+  }, [upstreamBranchIsolation]);
+
+  useEffect(() => {
+    downstreamBranchIsolationRef.current = downstreamBranchIsolation;
+  }, [downstreamBranchIsolation]);
+
+  useEffect(() => {
+    syncNumberedOutlineRef.current = syncNumberedOutline;
+  }, [syncNumberedOutline]);
+
+  const persistOutlineSyncState = (nextSyncState: boolean, nextSnapshot: OutlineItem[]) => {
+    syncNumberedOutlineRef.current = nextSyncState;
+    numberedOutlineSnapshotRef.current = nextSnapshot;
+    setSyncNumberedOutline(nextSyncState);
+    onOutlineSyncStateChangeRef.current(nextSyncState, nextSnapshot);
+  };
+
+  const refreshOutlineViews = (nextData: MindElixirData) => {
+    const nextOutline = buildOutline(nextData);
+    const visibleOutline = syncNumberedOutlineRef.current
+      ? nextOutline
+      : applyNumberedOutlineSnapshot(nextOutline, numberedOutlineSnapshotRef.current);
+
+    if (syncNumberedOutlineRef.current) {
+      numberedOutlineSnapshotRef.current = nextOutline;
+    }
+
+    setOutline(visibleOutline);
+    setNoteEntries(buildNoteEntries(nextData));
+  };
+
+  const getBranchMindData = (nodeId: string) => {
+    const storedBranch = branchMindMapsRef.current[nodeId];
+    if (storedBranch) return cloneMindData(storedBranch);
+    const branchNode = findMindMapNode(mainMindDataRef.current.nodeData, nodeId);
+    return branchNode ? createBranchMindMapFromNode(branchNode) : null;
+  };
+
+  const isIsolatedBranchSession = () => {
+    const rootNodeId = mainMindDataRef.current.nodeData.id;
+    return upstreamBranchIsolationRef.current && selectedPageIdRef.current !== rootNodeId;
+  };
+
+  const syncDescendantBranchMindMaps = (branchRoot: NodeObj) => {
+    if (downstreamBranchIsolationRef.current) return;
+    const updates: Array<{ nodeId: string; data: MindElixirData }> = [];
+    const walk = (node: NodeObj) => {
+      node.children?.forEach((child) => {
+        if (branchMindMapsRef.current[child.id]) {
+          updates.push({ nodeId: child.id, data: createBranchMindMapFromNode(child) });
+        }
+        walk(child);
+      });
+    };
+
+    walk(branchRoot);
+    updates.forEach(({ nodeId, data }) => saveBranchMindMap(nodeId, data));
+  };
+
+  const saveBranchMindMap = (nodeId: string, nextData: MindElixirData) => {
+    const savedData = cloneMindData(nextData);
+    branchMindMapsRef.current = {
+      ...branchMindMapsRef.current,
+      [nodeId]: savedData
+    };
+    onBranchMindMapChangeRef.current(nodeId, savedData);
+  };
+
+  const persistCurrentCanvasBeforeNavigation = () => {
+    const mind = mindRef.current;
+    if (!mind) return;
+    const nextData = mind.getData();
+    const branchCanvasId = activeBranchCanvasIdRef.current;
+
+    if (branchCanvasId) {
+      saveBranchMindMap(branchCanvasId, nextData);
+      syncDescendantBranchMindMaps(nextData.nodeData);
+      return;
+    }
+
+    mainMindDataRef.current = nextData;
+    onChangeRef.current(nextData);
+    refreshOutlineViews(nextData);
+    syncDescendantBranchMindMaps(nextData.nodeData);
+  };
+
+  const openMainMindMap = (focusId?: string) => {
+    const mind = mindRef.current;
+    if (!mind) return;
+    const nextData = cloneMindData(mainMindDataRef.current);
+    activeBranchCanvasIdRef.current = null;
+    mind.refresh(nextData);
+    refreshOutlineViews(nextData);
+    requestAnimationFrame(() => {
+      const targetId = focusId ?? nextData.nodeData.id;
+      const topic = mind.findEle(targetId);
+      if (!topic) return;
+      mind.selectNode(topic);
+      if (targetId === nextData.nodeData.id) {
+        mind.scrollIntoView(topic, true);
+        mind.toCenter();
+      } else {
+        mind.focusNode(topic);
+        mind.scrollIntoView(topic, true);
+      }
+    });
+  };
+
+  const openIsolatedBranchMindMap = (nodeId: string) => {
+    const mind = mindRef.current;
+    if (!mind) return false;
+    const branchData = getBranchMindData(nodeId);
+    if (!branchData) return false;
+    activeBranchCanvasIdRef.current = nodeId;
+    mind.refresh(branchData);
+    setSelectedNodeId(branchData.nodeData.id);
+    setSelectedNodeCount(1);
+    requestAnimationFrame(() => {
+      const rootNode = mind.findEle(branchData.nodeData.id);
+      if (!rootNode) return;
+      mind.selectNode(rootNode);
+      mind.scrollIntoView(rootNode, true);
+      mind.toCenter();
+    });
+    return true;
+  };
+
+  const persistCurrentMindData = (nextData: MindElixirData) => {
+    const branchCanvasId = activeBranchCanvasIdRef.current;
+    if (branchCanvasId) {
+      saveBranchMindMap(branchCanvasId, nextData);
+      syncDescendantBranchMindMaps(nextData.nodeData);
+      setToolHint("上分支隔离已开启：仅保存当前分支");
+      return;
+    }
+
+    mainMindDataRef.current = nextData;
+    refreshOutlineViews(nextData);
+    onChangeRef.current(nextData);
+    syncDescendantBranchMindMaps(nextData.nodeData);
+  };
 
   useEffect(() => {
     if (mode === "mindmap") {
@@ -901,10 +1473,29 @@ function MindMapEditor({
   }, [mode]);
 
   useEffect(() => {
+    selectedPageIdRef.current = data.nodeData.id;
+    upstreamBranchIsolationRef.current = false;
+    downstreamBranchIsolationRef.current = false;
+    activeBranchCanvasIdRef.current = null;
     setSelectedPageId(data.nodeData.id);
     setSelectedNodeId(data.nodeData.id);
     setSelectedNodeCount(1);
-  }, [courseId, data.nodeData.id]);
+    setUpstreamBranchIsolation(false);
+    setDownstreamBranchIsolation(false);
+    const nextOutline = buildOutline(data);
+    const nextSnapshot = persistedNumberedOutlineSnapshot.length > 0
+      ? persistedNumberedOutlineSnapshot
+      : nextOutline;
+    syncNumberedOutlineRef.current = persistedSyncNumberedOutline;
+    numberedOutlineSnapshotRef.current = nextSnapshot;
+    setSyncNumberedOutline(persistedSyncNumberedOutline);
+    setOutline(
+      persistedSyncNumberedOutline
+        ? nextOutline
+        : applyNumberedOutlineSnapshot(nextOutline, nextSnapshot)
+    );
+    setNoteEntries(buildNoteEntries(data));
+  }, [courseId, data.nodeData.id, persistedSyncNumberedOutline, persistedNumberedOutlineSnapshot]);
 
   useEffect(() => {
     if (!shouldMountMindMap) return;
@@ -926,15 +1517,12 @@ function MindMapEditor({
     mind.init(data || createMindMap(title));
     mindRef.current = mind;
     const initialData = mind.getData();
-    setOutline(buildOutline(initialData));
-    setNoteEntries(buildNoteEntries(initialData));
+    refreshOutlineViews(initialData);
     setSelectedNodeId(mind.nodeData.id);
 
     mind.bus.addListener("operation", () => {
       const nextData = mind.getData();
-      setOutline(buildOutline(nextData));
-      setNoteEntries(buildNoteEntries(nextData));
-      onChangeRef.current(nextData);
+      persistCurrentMindData(nextData);
     });
     mind.bus.addListener("selectNodes", (nodes) => {
       const nextSelectedId = nodes[0]?.id ?? null;
@@ -944,7 +1532,13 @@ function MindMapEditor({
     });
 
     return () => {
-      onChangeRef.current(mind.getData());
+      const nextData = mind.getData();
+      const branchCanvasId = activeBranchCanvasIdRef.current;
+      if (branchCanvasId) {
+        saveBranchMindMap(branchCanvasId, nextData);
+      } else {
+        onChangeRef.current(nextData);
+      }
       mind.destroy();
       mindRef.current = null;
     };
@@ -966,19 +1560,34 @@ function MindMapEditor({
   };
 
   const focusOutlineNode = (id: string) => {
+    persistCurrentCanvasBeforeNavigation();
+    selectedPageIdRef.current = id;
     setSelectedNodeId(id);
     setSelectedPageId(id);
     setSelectedNodeCount(1);
+    if (upstreamBranchIsolationRef.current && id !== mainMindDataRef.current.nodeData.id && openIsolatedBranchMindMap(id)) {
+      return;
+    }
+    if (isIsolatedBranchSession()) {
+      openMainMindMap(id);
+      return;
+    }
     focusMindNode(id);
   };
 
   const focusRootMindMap = () => {
-    const rootNodeId = mindRef.current?.nodeData.id ?? data.nodeData.id;
+    persistCurrentCanvasBeforeNavigation();
+    const rootNodeId = mainMindDataRef.current.nodeData.id;
+    selectedPageIdRef.current = rootNodeId;
     setSelectedPageId(rootNodeId);
     setSelectedNodeId(rootNodeId);
     setSelectedNodeCount(1);
     const mind = mindRef.current;
     if (!mind) return;
+    if (isIsolatedBranchSession() || mind.nodeData.id !== rootNodeId) {
+      openMainMindMap(rootNodeId);
+      return;
+    }
     if ((mind as MindElixirInstance & { isFocusMode?: boolean }).isFocusMode) {
       mind.cancelFocus();
     }
@@ -989,15 +1598,19 @@ function MindMapEditor({
     }
     mind.toCenter();
     const nextData = mind.getData();
-    setOutline(buildOutline(nextData));
-    setNoteEntries(buildNoteEntries(nextData));
+    persistCurrentMindData(nextData);
   };
 
   useEffect(() => {
     if (mode !== "mindmap") return;
     if (!shouldMountMindMap) return;
-    if (selectedPageId === (mindRef.current?.nodeData.id ?? data.nodeData.id)) {
+    const rootNodeId = mainMindDataRef.current.nodeData.id;
+    if (activeBranchCanvasIdRef.current === selectedPageId) return;
+    if (selectedPageId === rootNodeId) {
       focusRootMindMap();
+      return;
+    }
+    if (upstreamBranchIsolationRef.current && openIsolatedBranchMindMap(selectedPageId)) {
       return;
     }
     focusMindNode(selectedPageId);
@@ -1007,9 +1620,58 @@ function MindMapEditor({
     const mind = mindRef.current;
     if (!mind) return;
     const nextData = mind.getData();
-    setOutline(buildOutline(nextData));
+    persistCurrentMindData(nextData);
+  };
+
+  const toggleNumberedOutlineSync = () => {
+    const mind = mindRef.current;
+    const nextData = mind?.getData() ?? data;
+    const nextOutline = buildOutline(nextData);
+    const nextSyncState = !syncNumberedOutlineRef.current;
+
+    if (nextSyncState) {
+      persistOutlineSyncState(true, nextOutline);
+      setOutline(nextOutline);
+      setToolHint("目录同步已开启");
+    } else {
+      persistOutlineSyncState(false, nextOutline);
+      setOutline(applyNumberedOutlineSnapshot(nextOutline, nextOutline));
+      setToolHint("目录同步已关闭");
+    }
+
     setNoteEntries(buildNoteEntries(nextData));
-    onChangeRef.current(nextData);
+  };
+
+  const toggleUpstreamBranchIsolation = () => {
+    persistCurrentCanvasBeforeNavigation();
+    const nextIsolationState = !upstreamBranchIsolationRef.current;
+    const rootNodeId = mainMindDataRef.current.nodeData.id;
+    const activePageId = selectedPageIdRef.current;
+
+    upstreamBranchIsolationRef.current = nextIsolationState;
+    setUpstreamBranchIsolation(nextIsolationState);
+
+    if (nextIsolationState) {
+      if (activePageId !== rootNodeId && openIsolatedBranchMindMap(activePageId)) {
+        setToolHint("上分支隔离已开启：当前分支不会回写上级导图");
+        return;
+      }
+      setToolHint("上分支隔离已开启：选择子分支后生效");
+      return;
+    }
+
+    openMainMindMap(activePageId === rootNodeId ? rootNodeId : activePageId);
+    setToolHint("上分支隔离已关闭：编辑将回写上级导图");
+  };
+
+  const toggleDownstreamBranchIsolation = () => {
+    const nextIsolationState = !downstreamBranchIsolationRef.current;
+    downstreamBranchIsolationRef.current = nextIsolationState;
+    setDownstreamBranchIsolation(nextIsolationState);
+    setToolHint(nextIsolationState
+      ? "下分支隔离已开启：下级分支导图不再跟随当前分支"
+      : "下分支隔离已关闭：下级分支导图将跟随当前分支"
+    );
   };
 
   const findNodeSiblings = (root: NodeObj, targetId: string): { siblings: NodeObj[]; index: number; parentId: string } | null => {
@@ -1051,8 +1713,7 @@ function MindMapEditor({
     const targetIndex = source.index < target.index ? target.index - 1 : target.index;
     source.siblings.splice(targetIndex, 0, draggedNode);
     mind.refresh(nextData);
-    setOutline(buildOutline(nextData));
-    setNoteEntries(buildNoteEntries(nextData));
+    refreshOutlineViews(nextData);
     setSelectedNodeId(draggedId);
     setSelectedNodeCount(1);
     setToolHint("章节顺序已同步");
@@ -1104,6 +1765,25 @@ function MindMapEditor({
       const nextStyle = { ...(node.nodeObj.style ?? {}), ...patch };
       return mind.reshapeNode(node, { style: nextStyle });
     });
+  };
+
+  const copyMindNodeFormat = () => {
+    const node = getActiveNode();
+    if (!node) return;
+    setMindFormatBrush({ ...(node.nodeObj.style ?? {}) });
+    setToolHint("导图格式已复制");
+  };
+
+  const applyMindNodeFormat = async () => {
+    if (!mindFormatBrush) {
+      copyMindNodeFormat();
+      return;
+    }
+
+    await runWithActiveNode((mind, node) => {
+      return mind.reshapeNode(node, { style: { ...mindFormatBrush } });
+    });
+    setToolHint("导图格式已应用");
   };
 
   const toggleBold = async () => {
@@ -1361,14 +2041,16 @@ function MindMapEditor({
     document.removeEventListener("mouseup", stopOutlineResize);
   };
 
-  const rootNodeId = mindRef.current?.nodeData.id ?? data.nodeData.id;
+  const rootNodeId = mainMindDataRef.current.nodeData.id;
+  const canvasRootNodeId = mindRef.current?.nodeData.id ?? rootNodeId;
   const activePageId = selectedPageId ?? rootNodeId;
   const activeEditNodeId = selectedNodeId ?? activePageId;
-  const isRootSelected = activeEditNodeId === rootNodeId;
+  const isRootSelected = activeEditNodeId === canvasRootNodeId;
   const canUseMultiNodeTool = selectedNodeCount >= 2;
-  const activeOutlineItem = outline.find((item) => item.id === activePageId);
-  const activeTopic = activeOutlineItem?.topic ?? title;
   const activeKnowledge = knowledgePoints[activePageId] ?? "";
+  const activeBranchNode = branchMindMaps[activePageId]?.nodeData ?? findMindMapNode(data.nodeData, activePageId);
+  const activeOutlineItem = outline.find((item) => item.id === activePageId);
+  const activeTopic = activeBranchNode?.topic ?? activeOutlineItem?.topic ?? title;
 
   return (
     <div className="mindmap-editor-layout">
@@ -1463,11 +2145,13 @@ function MindMapEditor({
       <div className="mindmap-stage">
         {mode === "knowledge" && (
           <KnowledgePanel
+            key={activePageId}
             nodeId={activePageId}
             topic={activeTopic}
             value={activeKnowledge}
-            knowledgePoints={knowledgePoints}
+            branchNode={activeBranchNode}
             onKnowledgeChange={onKnowledgeChange}
+            saveStatus={saveStatus}
           />
         )}
 
@@ -1512,6 +2196,30 @@ function MindMapEditor({
                 >
                   <GitFork size={16} />
                   <span>紧凑</span>
+                </button>
+                <button
+                  className={syncNumberedOutline ? "active" : ""}
+                  title={syncNumberedOutline ? "目录跟随序号层级编辑" : "序号层级目录已冻结"}
+                  onClick={toggleNumberedOutlineSync}
+                >
+                  <List size={16} />
+                  <span>同步目录</span>
+                </button>
+                <button
+                  className={upstreamBranchIsolation ? "active" : ""}
+                  title={upstreamBranchIsolation ? "上分支隔离已开启" : "当前分支同步上级导图"}
+                  onClick={toggleUpstreamBranchIsolation}
+                >
+                  <GitFork size={16} />
+                  <span>上隔离</span>
+                </button>
+                <button
+                  className={downstreamBranchIsolation ? "active" : ""}
+                  title={downstreamBranchIsolation ? "下分支隔离已开启" : "下级分支跟随当前分支"}
+                  onClick={toggleDownstreamBranchIsolation}
+                >
+                  <GitBranchPlus size={16} />
+                  <span>下隔离</span>
                 </button>
               </div>
 
@@ -1621,6 +2329,15 @@ function MindMapEditor({
                 <button title="加粗" onClick={toggleBold}>
                   <Bold size={16} />
                   <span>加粗</span>
+                </button>
+                <button
+                  className={mindFormatBrush ? "active" : ""}
+                  title={mindFormatBrush ? "应用导图格式" : "复制导图格式"}
+                  onClick={applyMindNodeFormat}
+                  onDoubleClick={() => setMindFormatBrush(null)}
+                >
+                  <Paintbrush size={16} />
+                  <span>格式刷</span>
                 </button>
                 <div className="swatch-set" aria-label="文字颜色">
                   <Palette size={15} />
@@ -1738,56 +2455,667 @@ function MindMapEditor({
   );
 }
 
+const legacyFontSizeMap: Record<string, string> = {
+  "1": "12px",
+  "2": "14px",
+  "3": "16px",
+  "4": "18px",
+  "5": "24px",
+  "6": "32px",
+  "7": "36px"
+};
+
+const knowledgeInlineStyleProperties = [
+  "fontFamily",
+  "fontSize",
+  "fontWeight",
+  "fontStyle",
+  "textDecorationLine",
+  "color",
+  "backgroundColor"
+];
+
+const knowledgeBlockStyleProperties = [
+  "textAlign",
+  "lineHeight",
+  "letterSpacing",
+  "marginLeft",
+  "paddingLeft"
+];
+
+const knowledgePersistedStyleProperties = [
+  ...knowledgeInlineStyleProperties,
+  ...knowledgeBlockStyleProperties
+];
+
+function readStyleValue(style: CSSStyleDeclaration, property: string) {
+  return style.getPropertyValue(property.replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`));
+}
+
+function writeStyleValue(style: CSSStyleDeclaration, property: string, value: string) {
+  if (!value) return;
+  style.setProperty(property.replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`), value);
+}
+
+function copyKnowledgeElementStyles(source: HTMLElement, target: HTMLElement) {
+  knowledgePersistedStyleProperties.forEach((property) => {
+    writeStyleValue(target.style, property, readStyleValue(source.style, property));
+  });
+
+  const align = source.getAttribute("align");
+  if (align) target.style.textAlign = align;
+}
+
+function convertLegacyFontTags(root: HTMLElement) {
+  root.querySelectorAll("font").forEach((fontElement) => {
+    const span = document.createElement("span");
+    const size = fontElement.getAttribute("size");
+    const face = fontElement.getAttribute("face");
+    const color = fontElement.getAttribute("color");
+    const fontSize = size ? legacyFontSizeMap[size] : "";
+
+    if (fontSize) span.style.fontSize = fontSize;
+    if (face) span.style.fontFamily = face;
+    if (color) span.style.color = color;
+    while (fontElement.firstChild) span.appendChild(fontElement.firstChild);
+    fontElement.replaceWith(span);
+  });
+}
+
+function normalizeKnowledgeHtml(rawHtml: string) {
+  if (rawHtml.length === 0) return "";
+
+  const source = document.createElement("div");
+  source.innerHTML = rawHtml;
+  convertLegacyFontTags(source);
+  const output = document.createElement("div");
+  let paragraph = document.createElement("p");
+
+  const hasVisibleOrIntentionalContent = (element: HTMLElement) =>
+    element.textContent !== "" ||
+    element.querySelectorAll("br, img, table, ul, ol, .knowledge-branch-map").length > 0;
+
+  const appendParagraph = (preserveEmpty = false) => {
+    if (!hasVisibleOrIntentionalContent(paragraph)) {
+      if (preserveEmpty) {
+        paragraph.appendChild(document.createElement("br"));
+        output.appendChild(paragraph);
+      }
+      paragraph = document.createElement("p");
+      return;
+    }
+
+    output.appendChild(paragraph);
+    paragraph = document.createElement("p");
+  };
+
+  const appendInline = (node: Node) => {
+    paragraph.appendChild(node.cloneNode(true));
+  };
+
+  source.childNodes.forEach((node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      if ((node.textContent ?? "").length > 0) appendInline(node);
+      return;
+    }
+
+    if (!(node instanceof HTMLElement)) return;
+
+    if (node.tagName === "BR") {
+      appendParagraph(true);
+      return;
+    }
+
+    if (node.classList.contains("knowledge-branch-map")) {
+      appendParagraph();
+      output.appendChild(node.cloneNode(true));
+      return;
+    }
+
+    if (node.tagName === "DIV" || node.tagName === "P") {
+      appendParagraph();
+      const nextParagraph = document.createElement("p");
+      copyKnowledgeElementStyles(node, nextParagraph);
+      nextParagraph.innerHTML = node.innerHTML;
+      paragraph = nextParagraph;
+      appendParagraph(node.innerHTML === "" || node.innerHTML === "<br>");
+      return;
+    }
+
+    if (node.tagName === "UL" || node.tagName === "OL") {
+      appendParagraph();
+      output.appendChild(node.cloneNode(true));
+      return;
+    }
+
+    appendInline(node);
+  });
+
+  appendParagraph();
+  return output.innerHTML;
+}
+
 function KnowledgePanel({
   nodeId,
   topic,
   value,
-  knowledgePoints,
-  onKnowledgeChange
+  branchNode,
+  onKnowledgeChange,
+  saveStatus
 }: {
   nodeId: string;
   topic: string;
   value: string;
-  knowledgePoints: Record<string, string>;
-  onKnowledgeChange: (knowledgePoints: Record<string, string>) => void;
+  branchNode: NodeObj | null;
+  onKnowledgeChange: (nodeId: string, content: string) => void;
+  saveStatus: CourseSaveStatus;
 }) {
   const [draft, setDraft] = useState(value);
+  const [knowledgeFormatBrush, setKnowledgeFormatBrush] = useState<KnowledgeFormatBrush | null>(null);
+  const [historyState, setHistoryState] = useState<KnowledgeHistoryState>({ canUndo: false, canRedo: false });
   const latestDraftRef = useRef(value);
+  const persistedValueRef = useRef(value);
+  const nodeIdRef = useRef(nodeId);
+  const onKnowledgeChangeRef = useRef(onKnowledgeChange);
   const editorRef = useRef<HTMLDivElement | null>(null);
+  const selectionRangeRef = useRef<Range | null>(null);
+  const activeBlockRef = useRef<HTMLElement | null>(null);
+  const undoStackRef = useRef<string[]>([]);
+  const redoStackRef = useRef<string[]>([]);
+  const lastSelectApplyRef = useRef<{ key: string; value: string; at: number } | null>(null);
+  const isEditorFocusedRef = useRef(false);
+
+  const refreshHistoryState = () => {
+    setHistoryState({
+      canUndo: undoStackRef.current.length > 0,
+      canRedo: redoStackRef.current.length > 0
+    });
+  };
+
+  const getCurrentEditorHtml = () => normalizeKnowledgeHtml(editorRef.current?.innerHTML || "");
+
+  const restoreEditorHtml = (content: string) => {
+    const normalizedContent = normalizeKnowledgeHtml(content);
+    if (editorRef.current && editorRef.current.innerHTML !== normalizedContent) {
+      editorRef.current.innerHTML = normalizedContent;
+    }
+    selectionRangeRef.current = null;
+    latestDraftRef.current = normalizedContent;
+    setDraft(normalizedContent);
+    onKnowledgeChangeRef.current(nodeIdRef.current, normalizedContent);
+    persistedValueRef.current = normalizedContent;
+  };
+
+  const captureHistorySnapshot = () => {
+    const currentContent = getCurrentEditorHtml();
+    const history = undoStackRef.current;
+    if (history[history.length - 1] !== currentContent) {
+      history.push(currentContent);
+      if (history.length > knowledgeHistoryLimit) history.shift();
+    }
+    redoStackRef.current = [];
+    refreshHistoryState();
+  };
+
+  const undoKnowledgeEdit = () => {
+    const currentContent = getCurrentEditorHtml();
+    let previousContent = undoStackRef.current.pop();
+    while (previousContent === currentContent && undoStackRef.current.length > 0) {
+      previousContent = undoStackRef.current.pop();
+    }
+    if (previousContent === undefined) {
+      refreshHistoryState();
+      return;
+    }
+    redoStackRef.current.push(currentContent);
+    restoreEditorHtml(previousContent);
+    refreshHistoryState();
+    editorRef.current?.focus();
+  };
+
+  const redoKnowledgeEdit = () => {
+    const nextContent = redoStackRef.current.pop();
+    if (nextContent === undefined) {
+      refreshHistoryState();
+      return;
+    }
+    undoStackRef.current.push(getCurrentEditorHtml());
+    restoreEditorHtml(nextContent);
+    refreshHistoryState();
+    editorRef.current?.focus();
+  };
 
   useEffect(() => {
-    setDraft(value);
-    latestDraftRef.current = value;
-    if (editorRef.current && editorRef.current.innerHTML !== value) {
-      editorRef.current.innerHTML = value || "";
+    const normalizedValue = normalizeKnowledgeHtml(value);
+    const sameNode = nodeIdRef.current === nodeId;
+    const shouldPreserveFocusedDom = sameNode && isEditorFocusedRef.current;
+
+    persistedValueRef.current = normalizedValue;
+    nodeIdRef.current = nodeId;
+
+    if (shouldPreserveFocusedDom) {
+      return;
+    }
+
+    setDraft(normalizedValue);
+    latestDraftRef.current = normalizedValue;
+    selectionRangeRef.current = null;
+    activeBlockRef.current = null;
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    refreshHistoryState();
+    if (editorRef.current && editorRef.current.innerHTML !== normalizedValue) {
+      editorRef.current.innerHTML = normalizedValue || "";
+    }
+    if (value && normalizedValue !== value) {
+      onKnowledgeChangeRef.current(nodeId, normalizedValue);
     }
   }, [nodeId, value]);
 
   useEffect(() => {
+    onKnowledgeChangeRef.current = onKnowledgeChange;
+  }, [onKnowledgeChange]);
+
+  useEffect(() => {
+    return () => {
+      if (latestDraftRef.current !== persistedValueRef.current) {
+        onKnowledgeChangeRef.current(nodeIdRef.current, normalizeKnowledgeHtml(latestDraftRef.current));
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (draft === value) return;
+    if (draft !== latestDraftRef.current) return;
     latestDraftRef.current = draft;
     const timeoutId = window.setTimeout(() => {
-      onKnowledgeChange({ ...knowledgePoints, [nodeId]: latestDraftRef.current });
+      onKnowledgeChange(nodeId, latestDraftRef.current);
+      persistedValueRef.current = latestDraftRef.current;
     }, 360);
 
     return () => window.clearTimeout(timeoutId);
-  }, [draft, knowledgePoints, nodeId, onKnowledgeChange, value]);
+  }, [draft, nodeId, onKnowledgeChange, value]);
 
   const flushDraft = () => {
-    if (latestDraftRef.current !== value) {
-      onKnowledgeChange({ ...knowledgePoints, [nodeId]: latestDraftRef.current });
+    isEditorFocusedRef.current = false;
+    const normalizedDraft = normalizeKnowledgeHtml(latestDraftRef.current);
+    if (normalizedDraft !== latestDraftRef.current && editorRef.current) {
+      editorRef.current.innerHTML = normalizedDraft;
+      latestDraftRef.current = normalizedDraft;
+      setDraft(normalizedDraft);
+    }
+    if (normalizedDraft !== value) {
+      onKnowledgeChange(nodeId, normalizedDraft);
+      persistedValueRef.current = normalizedDraft;
     }
   };
 
-  const execCommand = (command: string, value?: string) => {
-    document.execCommand(command, false, value);
+  const rememberSelection = () => {
+    const editor = editorRef.current;
+    const selection = window.getSelection();
+    if (!editor || !selection || selection.rangeCount === 0) return;
+    if (!editor.contains(selection.anchorNode) || !editor.contains(selection.focusNode)) return;
+    selectionRangeRef.current = selection.getRangeAt(0).cloneRange();
+    activeBlockRef.current = getEditableBlock(selection.focusNode);
+  };
+
+  const restoreSelection = () => {
+    const editor = editorRef.current;
+    const range = selectionRangeRef.current;
+    if (!editor || !range) return;
+    const selection = window.getSelection();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+
+  const getActiveSelectionRange = () => {
+    restoreSelection();
+    const editor = editorRef.current;
+    const selection = window.getSelection();
+    if (!editor || !selection || selection.rangeCount === 0) return null;
+    const range = selection.getRangeAt(0);
+    if (!editor.contains(range.commonAncestorContainer)) return null;
+    return range;
+  };
+
+  const getSelectionElement = () => {
+    const range = getActiveSelectionRange();
+    if (!range) return activeBlockRef.current;
+    const node = range.startContainer.nodeType === Node.ELEMENT_NODE
+      ? range.startContainer
+      : range.startContainer.parentElement;
+    return node instanceof HTMLElement ? node : activeBlockRef.current;
+  };
+
+  const getEditableBlock = (node: Node | null) => {
+    const editor = editorRef.current;
+    if (!editor || !node) return null;
+    const element = node.nodeType === Node.ELEMENT_NODE ? node as Element : node.parentElement;
+    if (!element) return null;
+    const block = element.closest("p, div, li, h1, h2, h3, h4, h5, h6");
+    if (!(block instanceof HTMLElement) || !editor.contains(block) || block === editor) return null;
+    return block;
+  };
+
+  const setElementStyles = (element: HTMLElement, styles: Partial<CSSStyleDeclaration>) => {
+    Object.entries(styles).forEach(([key, styleValue]) => {
+      if (!styleValue) return;
+      writeStyleValue(element.style, key, String(styleValue));
+    });
+  };
+
+  const getStyleMap = (computedStyle: CSSStyleDeclaration | null, properties: string[]) => {
+    const styles: Record<string, string> = {};
+    if (!computedStyle) return styles;
+    properties.forEach((property) => {
+      const value = readStyleValue(computedStyle, property);
+      if (value) styles[property] = value;
+    });
+    return styles;
+  };
+
+  const getEditableBlocksInRange = (range: Range) => {
+    const editor = editorRef.current;
+    if (!editor) return [];
+    const blocks = new Set<HTMLElement>();
+    const addBlock = (node: Node | null) => {
+      const block = getEditableBlock(node);
+      if (block) blocks.add(block);
+    };
+
+    addBlock(range.startContainer);
+    addBlock(range.endContainer);
+
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_ELEMENT);
+    while (walker.nextNode()) {
+      const element = walker.currentNode;
+      if (!(element instanceof HTMLElement) || element === editor) continue;
+      if (!element.matches("p, div, li, h1, h2, h3, h4, h5, h6")) continue;
+      try {
+        if (range.intersectsNode(element)) blocks.add(element);
+      } catch {
+        // Detached browser selection nodes can throw during fast toolbar operations.
+      }
+    }
+
+    return Array.from(blocks);
+  };
+
+  const applyBlockStylesToSelection = (styles: Record<string, string>) => {
+    const range = getActiveSelectionRange();
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    const blocks = range
+      ? getEditableBlocksInRange(range)
+      : activeBlockRef.current && editor.contains(activeBlockRef.current) && activeBlockRef.current !== editor
+        ? [activeBlockRef.current]
+        : [];
+
+    blocks.forEach((block) => setElementStyles(block, styles));
+  };
+
+  const styleSelectedTextFragment = (fragment: DocumentFragment, styles: Partial<CSSStyleDeclaration>) => {
+    const wrappers: HTMLElement[] = [];
+    const walker = document.createTreeWalker(fragment, NodeFilter.SHOW_TEXT);
+    const textNodes: Text[] = [];
+
+    while (walker.nextNode()) {
+      if (walker.currentNode instanceof Text) textNodes.push(walker.currentNode);
+    }
+
+    textNodes.forEach((textNode) => {
+      const text = textNode.textContent ?? "";
+      if (text.trim().length === 0) return;
+
+      const wrapper = document.createElement("span");
+      setElementStyles(wrapper, styles);
+      textNode.parentNode?.insertBefore(wrapper, textNode);
+      wrapper.appendChild(textNode);
+      wrappers.push(wrapper);
+    });
+
+    return wrappers;
+  };
+
+  const applyStylesToRangeFragment = (range: Range, styles: Partial<CSSStyleDeclaration>) => {
+    const fragment = range.extractContents();
+    const wrappers = styleSelectedTextFragment(fragment, styles);
+    if (wrappers.length === 0) {
+      range.insertNode(fragment);
+      return [];
+    }
+
+    const marker = document.createComment("knowledge-selection-end");
+    fragment.appendChild(marker);
+    range.insertNode(fragment);
+    const firstWrapper = wrappers[0];
+    const lastWrapper = wrappers[wrappers.length - 1];
+    marker.remove();
+    return [firstWrapper, lastWrapper];
+  };
+
+  const applyInlineStyle = (styles: Partial<CSSStyleDeclaration>) => {
+    const range = getActiveSelectionRange();
+    if (!range) {
+      const editor = editorRef.current;
+      const block = activeBlockRef.current;
+      if (editor && block && editor.contains(block) && block !== editor) {
+        captureHistorySnapshot();
+        setElementStyles(block, styles);
+        commitCurrentEditor();
+      }
+      editorRef.current?.focus();
+      return;
+    }
+
+    if (range.collapsed) {
+      const block = getEditableBlock(range.startContainer);
+      if (block) {
+        captureHistorySnapshot();
+        setElementStyles(block, styles);
+        rememberSelection();
+        commitCurrentEditor();
+      }
+      editorRef.current?.focus();
+      return;
+    }
+
+    captureHistorySnapshot();
+    const wrapperBounds = applyStylesToRangeFragment(range, styles);
+    if (wrapperBounds.length === 0) {
+      editorRef.current?.focus();
+      return;
+    }
+
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    const nextRange = document.createRange();
+    nextRange.setStartBefore(wrapperBounds[0]);
+    nextRange.setEndAfter(wrapperBounds[1]);
+    selection?.addRange(nextRange);
+    rememberSelection();
     editorRef.current?.focus();
+    commitCurrentEditor();
+  };
+
+  const execCommand = (command: string, value?: string) => {
+    restoreSelection();
+    captureHistorySnapshot();
+    document.execCommand(command, false, value);
+    rememberSelection();
+    editorRef.current?.focus();
+    commitCurrentEditor();
+  };
+
+  const applyFontFamily = (fontFamily: string) => {
+    applyInlineStyle({ fontFamily });
+  };
+
+  const applyFontSize = (fontSize: string) => {
+    applyInlineStyle({ fontSize });
+  };
+
+  const handleFontFamilySelect = (event: React.FormEvent<HTMLSelectElement>) => {
+    if (!shouldApplySelectValue("fontFamily", event.currentTarget.value)) return;
+    applyFontFamily(event.currentTarget.value);
+  };
+
+  const handleFontSizeSelect = (event: React.FormEvent<HTMLSelectElement>) => {
+    if (!shouldApplySelectValue("fontSize", event.currentTarget.value)) return;
+    applyFontSize(event.currentTarget.value);
+  };
+
+  const shouldApplySelectValue = (key: string, value: string) => {
+    const now = performance.now();
+    const lastApply = lastSelectApplyRef.current;
+    if (lastApply && lastApply.key === key && lastApply.value === value && now - lastApply.at < 120) {
+      return false;
+    }
+    lastSelectApplyRef.current = { key, value, at: now };
+    return true;
+  };
+
+  const applyTextColor = (color: string) => {
+    applyInlineStyle({ color });
+  };
+
+  const applyBackgroundColor = (backgroundColor: string) => {
+    applyInlineStyle({ backgroundColor });
+  };
+
+  const commitCurrentEditor = () => {
+    const content = normalizeKnowledgeHtml(editorRef.current?.innerHTML || "");
+    if (editorRef.current && editorRef.current.innerHTML !== content) editorRef.current.innerHTML = content;
+    setDraft(content);
+    latestDraftRef.current = content;
+    onKnowledgeChange(nodeId, content);
+    persistedValueRef.current = content;
+  };
+
+  const copyKnowledgeFormat = () => {
+    restoreSelection();
+    const sourceElement = getSelectionElement();
+    const sourceBlock = activeBlockRef.current ?? getEditableBlock(sourceElement);
+    const computedStyle = sourceElement ? window.getComputedStyle(sourceElement) : null;
+    const blockStyle = sourceBlock ? window.getComputedStyle(sourceBlock) : computedStyle;
+    setKnowledgeFormatBrush({
+      inlineStyles: getStyleMap(computedStyle, knowledgeInlineStyleProperties),
+      blockStyles: getStyleMap(blockStyle, knowledgeBlockStyleProperties)
+    });
+    editorRef.current?.focus();
+  };
+
+  const applyKnowledgeFormat = () => {
+    if (!knowledgeFormatBrush) {
+      copyKnowledgeFormat();
+      return;
+    }
+
+    restoreSelection();
+    applyInlineStyle(knowledgeFormatBrush.inlineStyles);
+    applyBlockStylesToSelection(knowledgeFormatBrush.blockStyles);
+    rememberSelection();
+    editorRef.current?.focus();
+    commitCurrentEditor();
   };
 
   const handleInput = () => {
     const content = editorRef.current?.innerHTML || "";
     setDraft(content);
     latestDraftRef.current = content;
+    rememberSelection();
+  };
+
+  const handleEditorKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const key = event.key.toLowerCase();
+    if (!event.ctrlKey && !event.metaKey) return;
+    if (key === "z" && !event.shiftKey) {
+      event.preventDefault();
+      undoKnowledgeEdit();
+      return;
+    }
+    if (key === "x" || key === "y" || (key === "z" && event.shiftKey)) {
+      event.preventDefault();
+      redoKnowledgeEdit();
+    }
+  };
+
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      if (!isEditorFocusedRef.current) return;
+      rememberSelection();
+    };
+
+    document.addEventListener("selectionchange", handleSelectionChange);
+    return () => document.removeEventListener("selectionchange", handleSelectionChange);
+  }, []);
+
+  const commitEditorContent = (content: string) => {
+    const normalizedContent = normalizeKnowledgeHtml(content);
+    if (editorRef.current && editorRef.current.innerHTML !== normalizedContent) {
+      editorRef.current.innerHTML = normalizedContent;
+    }
+    setDraft(normalizedContent);
+    latestDraftRef.current = normalizedContent;
+    onKnowledgeChange(nodeId, normalizedContent);
+    persistedValueRef.current = normalizedContent;
+  };
+
+  const insertBranchMap = () => {
+    if (!branchNode || !editorRef.current) return;
+    const branchHtml = renderKnowledgeBranchHtml(branchNode);
+    restoreSelection();
+    editorRef.current.focus();
+    captureHistorySnapshot();
+
+    const selection = window.getSelection();
+    const shouldInsertAtSelection =
+      selection &&
+      selection.rangeCount > 0 &&
+      editorRef.current.contains(selection.anchorNode);
+
+    if (shouldInsertAtSelection) {
+      document.execCommand("insertHTML", false, branchHtml);
+    } else {
+      editorRef.current.insertAdjacentHTML("beforeend", branchHtml);
+    }
+
+    commitEditorContent(editorRef.current.innerHTML || "");
+    rememberSelection();
+  };
+
+  const handleEditorClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    const closeButton = target.closest(".branch-map-close");
+    if (!closeButton || !editorRef.current) return;
+
+    event.preventDefault();
+    const branchMap = closeButton.closest(".knowledge-branch-map");
+    if (!branchMap) return;
+
+    captureHistorySnapshot();
+    const nextSibling = branchMap.nextSibling;
+    branchMap.remove();
+    if (
+      nextSibling instanceof HTMLParagraphElement &&
+      (nextSibling.textContent ?? "").trim() === "" &&
+      nextSibling.querySelector("br")
+    ) {
+      nextSibling.remove();
+    }
+
+    commitEditorContent(editorRef.current.innerHTML || "");
+    selectionRangeRef.current = null;
+  };
+
+  const protectToolbarSelection = (event: React.MouseEvent<HTMLDivElement>) => {
+    rememberSelection();
+    const target = event.target as HTMLElement;
+    if (target.closest("select") || target.closest('input[type="color"]')) return;
+    event.preventDefault();
+    restoreSelection();
   };
 
   return (
@@ -1797,10 +3125,21 @@ function KnowledgePanel({
           <span>知识点</span>
           <h3>{topic}</h3>
         </div>
-        <small>自动保存</small>
+        <small className={`auto-save-status inline ${saveStatus}`}>{getCourseSaveStatusLabel(saveStatus)}</small>
       </header>
 
-      <div className="knowledge-toolbar">
+      <div className="knowledge-toolbar" onMouseDown={protectToolbarSelection}>
+        <div className="toolbar-group">
+          <button title="撤销 (Ctrl+Z)" disabled={!historyState.canUndo} onClick={undoKnowledgeEdit}>
+            <Undo2 size={16} />
+          </button>
+          <button title="重做 (Ctrl+X)" disabled={!historyState.canRedo} onClick={redoKnowledgeEdit}>
+            <Redo2 size={16} />
+          </button>
+        </div>
+
+        <div className="toolbar-divider" />
+
         <div className="toolbar-group">
           <button title="加粗 (Ctrl+B)" onClick={() => execCommand("bold")}>
             <Bold size={16} />
@@ -1819,14 +3158,29 @@ function KnowledgePanel({
         <div className="toolbar-divider" />
 
         <div className="toolbar-group">
-          <select title="字体大小" onChange={(e) => execCommand("fontSize", e.target.value)}>
-            <option value="3">正常</option>
-            <option value="1">小</option>
-            <option value="2">较小</option>
-            <option value="4">较大</option>
-            <option value="5">大</option>
-            <option value="6">特大</option>
-            <option value="7">超大</option>
+          <select
+            title="字体"
+            defaultValue="Microsoft YaHei"
+            onChange={handleFontFamilySelect}
+            onInput={handleFontFamilySelect}
+          >
+            {knowledgeFontFamilies.map((font) => (
+              <option key={font.value} value={font.value}>
+                {font.label}
+              </option>
+            ))}
+          </select>
+          <select
+            title="字号"
+            defaultValue="22px"
+            onChange={handleFontSizeSelect}
+            onInput={handleFontSizeSelect}
+          >
+            {knowledgeFontSizes.map((size) => (
+              <option key={size} value={size}>
+                {size.replace("px", "")}
+              </option>
+            ))}
           </select>
         </div>
 
@@ -1838,7 +3192,7 @@ function KnowledgePanel({
             <input
               type="color"
               defaultValue="#111827"
-              onChange={(e) => execCommand("foreColor", e.target.value)}
+              onChange={(e) => applyTextColor(e.target.value)}
             />
           </label>
           <label title="背景颜色" className="color-picker-label">
@@ -1846,7 +3200,7 @@ function KnowledgePanel({
             <input
               type="color"
               defaultValue="#ffffff"
-              onChange={(e) => execCommand("hiliteColor", e.target.value)}
+              onChange={(e) => applyBackgroundColor(e.target.value)}
             />
           </label>
         </div>
@@ -1893,21 +3247,52 @@ function KnowledgePanel({
         <div className="toolbar-divider" />
 
         <div className="toolbar-group">
+          <button
+            className={knowledgeFormatBrush ? "active" : ""}
+            title={knowledgeFormatBrush ? "应用格式刷" : "复制格式"}
+            onClick={applyKnowledgeFormat}
+            onDoubleClick={() => setKnowledgeFormatBrush(null)}
+          >
+            <Paintbrush size={16} />
+          </button>
           <button title="清除格式" onClick={() => execCommand("removeFormat")}>
             <RotateCcw size={16} />
           </button>
         </div>
+
+        <div className="toolbar-divider" />
+
+        <div className="toolbar-group">
+          <button
+            className="branch-map-button"
+            disabled={!branchNode}
+            title="插入当前分支思维导图"
+            onClick={insertBranchMap}
+          >
+            <GitFork size={16} />
+          </button>
+        </div>
       </div>
 
-      <div
-        ref={editorRef}
-        className="knowledge-editor"
-        contentEditable
-        onInput={handleInput}
-        onBlur={flushDraft}
-        data-placeholder="定义、重点、例子、易错点..."
-        suppressContentEditableWarning
-      />
+      <div className="knowledge-reader-stage">
+        <div
+          ref={editorRef}
+          className="knowledge-editor"
+          contentEditable
+          onFocus={() => {
+            isEditorFocusedRef.current = true;
+          }}
+          onBeforeInput={captureHistorySnapshot}
+          onInput={handleInput}
+          onClick={handleEditorClick}
+          onKeyDown={handleEditorKeyDown}
+          onKeyUp={rememberSelection}
+          onMouseUp={rememberSelection}
+          onBlur={flushDraft}
+          data-placeholder="定义、重点、例子、易错点..."
+          suppressContentEditableWarning
+        />
+      </div>
     </section>
   );
 }

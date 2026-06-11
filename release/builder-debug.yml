@@ -5,6 +5,8 @@ x64:
     - '!release{,/**/*}'
     - dist/**/*
     - dist-electron/**/*
+    - docs/**/*
+    - mcp/**/*
     - assets/**/*
     - package.json
     - '!**/*.{iml,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,suo,xproj,cc,d.ts,mk,a,o,obj,forge-meta,pdb}'
@@ -18,5 +20,7 @@ x64:
     - '**/*'
     - dist/**/*
     - dist-electron/**/*
+    - docs/**/*
+    - mcp/**/*
     - assets/**/*
     - package.json

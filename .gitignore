@@ -12,4 +12,15 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Ignore generated dependencies and build outputs
+node_modules/
+dist/
+dist-electron/
+release/
+release-fixed/
+
+# Ignore agent/tool scratch directories
+.claude/
+.omx/
+
 # 保留所有文件（使用 Git LFS 管理大文件）

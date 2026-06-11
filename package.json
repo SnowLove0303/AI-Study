@@ -16,6 +16,7 @@
   "dependencies": {
     "lucide-react": "^0.561.0",
     "mind-elixir": "^5.12.2",
+    "mysql2": "^3.22.5",
     "react": "^19.2.1",
     "react-dom": "^19.2.1"
   },
@@ -35,12 +36,15 @@
   "build": {
     "appId": "com.snowlove0303.aistudy",
     "productName": "AIstudy",
+    "executableName": "AIstudy",
     "directories": {
       "output": "release"
     },
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "docs/**/*",
+      "mcp/**/*",
       "assets/**/*",
       "package.json"
     ],
@@ -48,7 +52,9 @@
       {
         "from": "public",
         "to": "public",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {
@@ -66,7 +72,11 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "shortcutName": "AIstudy",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico"
     }
   }
 }
