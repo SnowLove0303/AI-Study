@@ -42,6 +42,25 @@ const implementationRules = [
     ]
   },
   {
+    label: "course outline, knowledge page, and mind-map node relations are centralized",
+    file: "src/domain/courseRelations.ts",
+    markers: [
+      "export function isKnowledgePageSelectable",
+      "export function getAdjacentKnowledgePageIds",
+      "export function findFirstSelectableDescendant",
+      "export function isOutlineDescendant"
+    ]
+  },
+  {
+    label: "course workspace uses centralized relation helpers",
+    file: "src/main.tsx",
+    markers: [
+      "getKnowledgeContentPageIds(outline, outlineParentIds, hideParentKnowledgePages, knowledgePoints, knowledgeDocuments)",
+      "getAdjacentKnowledgePageIds(outline, activePageId, knowledgeContentPageIds)",
+      "findNearestContentAncestor(outline, activePageId, pageHasKnowledgeContent)"
+    ]
+  },
+  {
     label: "parent nodes can show a temporary child outline",
     file: "src/main.tsx",
     markers: ["shouldShowAutoBranchOutline", "renderCanvasMindBranchHtml(activeBranchNode)", "isAutoOutline"]

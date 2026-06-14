@@ -85,6 +85,20 @@ import {
 import { updateLog, type UpdateLogEntry } from "./updateLog";
 import { createCourse, normalizeCourses } from "./domain/course";
 import {
+  findFirstContentDescendant,
+  findFirstSelectableDescendant,
+  findNearestContentAncestor,
+  getAdjacentKnowledgePageIds,
+  getFirstKnowledgePageId,
+  getKnowledgeContentPageIds,
+  getKnowledgePageTitle,
+  hasKnowledgeContent,
+  hasKnowledgeDocumentContent,
+  hasKnowledgePageContent,
+  isKnowledgePageSelectable,
+  isOutlineDescendant
+} from "./domain/courseRelations";
+import {
   createBranchMindMapStatePatch,
   createCollapsedOutlineStatePatch,
   createHideParentKnowledgePagesPatch,
@@ -742,28 +756,6 @@ function renderMindMapText(value: string) {
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\[color=(#[0-9a-fA-F]{3,6})\](.+?)\[\/color\]/g, '<span style="color:$1">$2</span>')
     .replace(/\[mark=(#[0-9a-fA-F]{3,6})\](.+?)\[\/mark\]/g, '<mark style="background:$1">$2</mark>');
-}
-
-function hasKnowledgeContent(rawHtml: string | undefined) {
-  if (!rawHtml) return false;
-  const container = document.createElement("div");
-  container.innerHTML = rawHtml;
-  const text = (container.textContent ?? "").replace(/\u00a0/g, " ").trim();
-  if (text.length > 0) return true;
-  return Boolean(container.querySelector("img, svg, canvas, table, ul, ol, li, .knowledge-flowchart, .knowledge-branch-map"));
-}
-
-function hasCanvasElementContent(value: unknown): boolean {
-  if (typeof value === "string") return value.replace(/\u00a0/g, " ").trim().length > 0;
-  if (Array.isArray(value)) return value.some(hasCanvasElementContent);
-  if (!value || typeof value !== "object") return false;
-  return Object.values(value as Record<string, unknown>).some(hasCanvasElementContent);
-}
-
-function hasKnowledgeDocumentContent(document: KnowledgeCanvasDocument | null | undefined) {
-  if (!document) return false;
-  if (hasKnowledgeContent(document.html)) return true;
-  return hasCanvasElementContent(document.data?.main);
 }
 
 function createDefaultFlowchart(): KnowledgeFlowchart {
@@ -3590,93 +3582,30 @@ function MindMapEditor({
     : activeKnowledge;
   const activeKnowledgePanelDocument = shouldShowAutoBranchOutline ? null : activeKnowledgeDocument;
   const visibleOutline = useMemo(() => getVisibleOutline(outline, collapsedOutlineIds), [outline, collapsedOutlineIds]);
-  const hasKnowledgePageContent = (pageId: string) =>
-    hasKnowledgeContent(knowledgePoints[pageId]) || hasKnowledgeDocumentContent(knowledgeDocuments[pageId]);
-  const isKnowledgePageSelectable = (pageId: string) =>
-    !hideParentKnowledgePages || !outlineParentIds.has(pageId) || hasKnowledgePageContent(pageId);
+  const pageHasKnowledgeContent = (pageId: string) =>
+    hasKnowledgePageContent(pageId, knowledgePoints, knowledgeDocuments);
+  const pageIsKnowledgeSelectable = (pageId: string) =>
+    isKnowledgePageSelectable(pageId, outlineParentIds, hideParentKnowledgePages, knowledgePoints, knowledgeDocuments);
   const knowledgeContentPageIds = useMemo(
     () =>
-      outline
-        .filter((item) => hasKnowledgePageContent(item.id) && isKnowledgePageSelectable(item.id))
-        .map((item) => item.id),
+      getKnowledgeContentPageIds(outline, outlineParentIds, hideParentKnowledgePages, knowledgePoints, knowledgeDocuments),
     [hideParentKnowledgePages, knowledgeDocuments, knowledgePoints, outline, outlineParentIds]
   );
   const knowledgeContentPageIdSet = useMemo(() => new Set(knowledgeContentPageIds), [knowledgeContentPageIds]);
   const firstKnowledgePageId = useMemo(
     () =>
-      knowledgeContentPageIds[0]
-      ?? outline.find((item) => isKnowledgePageSelectable(item.id))?.id
-      ?? null,
-    [hideParentKnowledgePages, knowledgeContentPageIds, outline, outlineParentIds]
+      getFirstKnowledgePageId(outline, outlineParentIds, hideParentKnowledgePages, knowledgePoints, knowledgeDocuments),
+    [hideParentKnowledgePages, knowledgeDocuments, knowledgePoints, outline, outlineParentIds]
   );
-  const activeOutlineIndex = outline.findIndex((item) => item.id === activePageId);
-  const previousKnowledgePageId = (() => {
-    if (activeOutlineIndex <= 0) return null;
-    for (let index = activeOutlineIndex - 1; index >= 0; index -= 1) {
-      const candidateId = outline[index]?.id;
-      if (candidateId && knowledgeContentPageIdSet.has(candidateId)) return candidateId;
-    }
-    return null;
-  })();
-  const nextKnowledgePageId = (() => {
-    const startIndex = activeOutlineIndex >= 0 ? activeOutlineIndex + 1 : 0;
-    for (let index = startIndex; index < outline.length; index += 1) {
-      const candidateId = outline[index]?.id;
-      if (candidateId && knowledgeContentPageIdSet.has(candidateId)) return candidateId;
-    }
-    return null;
-  })();
-  const getKnowledgePageTitle = (pageId: string | null) => {
-    if (!pageId) return null;
-    return outline.find((item) => item.id === pageId)?.topic ?? null;
-  };
-  const findFirstSelectableDescendant = (itemId: string) => {
-    const startIndex = outline.findIndex((item) => item.id === itemId);
-    if (startIndex < 0) return null;
-    const parentDepth = outline[startIndex].depth;
-    for (let index = startIndex + 1; index < outline.length; index += 1) {
-      const candidate = outline[index];
-      if (candidate.depth <= parentDepth) break;
-      if (isKnowledgePageSelectable(candidate.id)) return candidate.id;
-    }
-    return null;
-  };
-  const findFirstContentDescendant = (itemId: string) => {
-    const startIndex = outline.findIndex((item) => item.id === itemId);
-    if (startIndex < 0) return null;
-    const parentDepth = outline[startIndex].depth;
-    for (let index = startIndex + 1; index < outline.length; index += 1) {
-      const candidate = outline[index];
-      if (candidate.depth <= parentDepth) break;
-      if (knowledgeContentPageIdSet.has(candidate.id)) return candidate.id;
-    }
-    return null;
-  };
-  const findNearestContentAncestor = (itemId: string) => {
-    const byId = new Map(outline.map((item) => [item.id, item]));
-    let current = byId.get(itemId);
-    while (current) {
-      const parent = byId.get(current.parentId);
-      if (!parent) return null;
-      if (hasKnowledgePageContent(parent.id)) return parent.id;
-      current = parent;
-    }
-    return null;
-  };
-  const isOutlineDescendant = (parentId: string, childId: string) => {
-    const byId = new Map(outline.map((item) => [item.id, item]));
-    let current = byId.get(childId);
-    while (current) {
-      if (current.parentId === parentId) return true;
-      current = byId.get(current.parentId);
-    }
-    return false;
-  };
+  const { previousKnowledgePageId, nextKnowledgePageId } = useMemo(
+    () => getAdjacentKnowledgePageIds(outline, activePageId, knowledgeContentPageIds),
+    [activePageId, knowledgeContentPageIds, outline]
+  );
   const handleHideParentKnowledgePagesChange = () => {
     const nextValue = !hideParentKnowledgePages;
     onHideParentKnowledgePagesChange(nextValue);
     if (!nextValue || !outlineParentIds.has(activePageId)) return;
-    const nextPageId = findFirstSelectableDescendant(activePageId);
+    const nextPageId = findFirstSelectableDescendant(outline, activePageId, pageIsKnowledgeSelectable);
     if (nextPageId) focusOutlineNode(nextPageId);
   };
 
@@ -3687,14 +3616,14 @@ function MindMapEditor({
 
     const enteredKnowledgeMode = previousModeRef.current !== "knowledge";
     const activeIsRoot = activePageId === rootNodeId;
-    const activeIsDisabledParent = !isKnowledgePageSelectable(activePageId);
-    const activeHasContent = hasKnowledgePageContent(activePageId);
-    const nearestContentAncestorId = findNearestContentAncestor(activePageId);
+    const activeIsDisabledParent = !pageIsKnowledgeSelectable(activePageId);
+    const activeHasContent = pageHasKnowledgeContent(activePageId);
+    const nearestContentAncestorId = findNearestContentAncestor(outline, activePageId, pageHasKnowledgeContent);
     const activeIsEmptyPageFromModeSwitch = enteredKnowledgeMode && !activeHasContent && Boolean(nearestContentAncestorId);
     if (!activeIsRoot && !activeIsDisabledParent && !activeIsEmptyPageFromModeSwitch) return;
 
     const targetPageId = activeIsDisabledParent
-      ? findFirstContentDescendant(activePageId) ?? firstKnowledgePageId
+      ? findFirstContentDescendant(outline, activePageId, knowledgeContentPageIdSet) ?? firstKnowledgePageId
       : activeIsEmptyPageFromModeSwitch
         ? nearestContentAncestorId ?? firstKnowledgePageId
         : firstKnowledgePageId;
@@ -3736,7 +3665,7 @@ function MindMapEditor({
     manualCollapseGuardRef.current = Date.now();
     setCollapsedOutlineIds(nextIds);
     onCollapsedOutlineChange(nextIds);
-    if (!isCollapsed && activePageId !== itemId && isOutlineDescendant(itemId, activePageId)) {
+    if (!isCollapsed && activePageId !== itemId && isOutlineDescendant(outline, itemId, activePageId)) {
       selectedPageIdRef.current = itemId;
       setSelectedPageId(itemId);
       setSelectedNodeId(itemId);
@@ -3980,8 +3909,8 @@ function MindMapEditor({
             onKnowledgeDocumentChange={onKnowledgeDocumentChange}
             onNavigateNextKnowledgePage={nextKnowledgePageId ? () => focusOutlineNode(nextKnowledgePageId) : null}
             onNavigatePreviousKnowledgePage={previousKnowledgePageId ? () => focusOutlineNode(previousKnowledgePageId) : null}
-            nextKnowledgePageTitle={getKnowledgePageTitle(nextKnowledgePageId)}
-            previousKnowledgePageTitle={getKnowledgePageTitle(previousKnowledgePageId)}
+            nextKnowledgePageTitle={getKnowledgePageTitle(outline, nextKnowledgePageId)}
+            previousKnowledgePageTitle={getKnowledgePageTitle(outline, previousKnowledgePageId)}
             hideParentKnowledgePages={hideParentKnowledgePages}
             onToggleParentKnowledgePages={handleHideParentKnowledgePagesChange}
           />
