@@ -157,7 +157,11 @@ function validateKnownFinanceTree(course, nodes) {
     ea787c1406945de2: { parentId: "ea5c26347b08f32c", depth: 2 },
     ea68e4a203b8914d: { parentId: "ea567e2d8636b864", depth: 1 },
     eab5fe90c669192f: { parentId: "ea68e4a203b8914d", depth: 2 },
-    eab60236a3cf478e: { parentId: "eab5fe90c669192f", depth: 3 }
+    eab60236a3cf478e: { parentId: "eab5fe90c669192f", depth: 3 },
+    eab63520c37a9d2b: { parentId: "eab61e99bec96681", depth: 5, topic: "条件" },
+    eab6358b910f7a3a: { parentId: "eab61e99bec96681", depth: 5, topic: "原则" },
+    eab6319f49ac7c7f: { parentId: "eab62ad3f1c30afe", depth: 5, topic: "条件" },
+    eab632bb9f14a202: { parentId: "eab62ad3f1c30afe", depth: 5, topic: "顺序" }
   };
 
   for (const [id, expected] of Object.entries(expectedNodes)) {
@@ -169,6 +173,11 @@ function validateKnownFinanceTree(course, nodes) {
     if (actual.parentId !== expected.parentId || actual.depth !== expected.depth) {
       fail(
         `${course.title || course.id}: node ${id} parent/depth changed: actual=${actual.parentId}/${actual.depth}, expected=${expected.parentId}/${expected.depth}`
+      );
+    }
+    if (expected.topic && actual.node.topic !== expected.topic) {
+      fail(
+        `${course.title || course.id}: node ${id} topic changed: actual=${actual.node.topic}, expected=${expected.topic}`
       );
     }
   }

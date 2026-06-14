@@ -9,6 +9,14 @@ export type UpdateLogEntry = {
 
 export const updateLog: UpdateLogEntry[] = [
   {
+    version: "1.2.166",
+    date: "2026-06-14",
+    title: "父子级折叠结构恢复",
+    featureUpdates: ["恢复股票分配相关目录的真实父子级子节点结构"],
+    fixes: ["修复分支折叠标题残留覆盖主目录节点，导致条件、原则、顺序等子级关系丢失的问题"],
+    optimizations: ["课程库检查新增关键股票子级节点守卫，防止分支缓存再次吞掉真实目录节点"]
+  },
+  {
     version: "1.2.165",
     date: "2026-06-14",
     title: "分支目录标题同步",
