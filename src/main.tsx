@@ -81,6 +81,24 @@ import {
   UsersRound
 } from "lucide-react";
 import { updateLog, type UpdateLogEntry } from "./updateLog";
+import { createCourse, normalizeCourses } from "./domain/course";
+import { escapeHtml } from "./domain/html";
+import {
+  applyNumberedOutlineSnapshot,
+  buildNoteEntries,
+  buildOutline,
+  cloneMindData,
+  createBranchMindMapFromNode,
+  createMindMap,
+  findMindMapNode,
+  getOutlineAncestorIds,
+  getOutlineParentIds,
+  getVisibleOutline,
+  readableMindMapDefaultScale,
+  renderKnowledgeBranchHtml,
+  updateMindMapBranch
+} from "./domain/mindMap";
+import type { Course, CourseWorkspaceMode, KnowledgeCanvasDocument, NoteEntry, OutlineItem } from "./domain/types";
 import "./styles.css";
 
 type ViewId =
@@ -99,32 +117,6 @@ type Tone = "teal" | "amber" | "blue" | "rose";
 
 type Task = { title: string; meta: string; progress: number; tone: Tone };
 type ScheduleItem = { time: string; title: string; tag: string };
-type KnowledgeCanvasDocument = {
-  kind: "canvas-editor";
-  version: 1 | 2;
-  nodeId: string;
-  topic: string;
-  html: string;
-  data: IEditorData;
-  options?: IEditorOption;
-  updatedAt: string;
-};
-type Course = {
-  id: string;
-  title: string;
-  category: string;
-  description: string;
-  progress: number;
-  createdAt: string;
-  mindMap: MindElixirData;
-  knowledgePoints: Record<string, string>;
-  knowledgeDocuments?: Record<string, KnowledgeCanvasDocument>;
-  branchMindMaps?: Record<string, MindElixirData>;
-  syncNumberedOutline?: boolean;
-  numberedOutlineSnapshot?: OutlineItem[];
-  collapsedOutlineIds?: string[];
-  hideParentKnowledgePages?: boolean;
-};
 type CourseCenterLabels = {
   centerTitle: string;
   detailBackLabel: string;
@@ -164,25 +156,6 @@ type CourseCollectionConfig = {
   payloadKey: "courses" | "documents";
   labels: CourseCenterLabels;
   getApi: () => CourseCollectionApi | undefined;
-};
-type OutlineItem = {
-  id: string;
-  topic: string;
-  depth: number;
-  parentId: string;
-  numbering: string;
-};
-type NoteEntry = {
-  id: string;
-  topic: string;
-  depth: number;
-  parentId: string;
-  path: Array<{ id: string; topic: string; depth: number }>;
-  note: string;
-  tags: string[];
-  childTopics: string[];
-  isLeaf: boolean;
-  order: number;
 };
 type KnowledgeFormatBrush = {
   inlineStyles: Record<string, string>;
@@ -248,7 +221,6 @@ type FlowchartEditorState = {
   data: KnowledgeFlowchart;
   selectedNodeId: string;
 };
-type CourseWorkspaceMode = "knowledge" | "notes" | "mindmap";
 type AppSettings = {
   mindMapArrowPan: boolean;
 };
@@ -575,29 +547,6 @@ const focusTasks: Task[] = [];
 const schedule: ScheduleItem[] = [];
 const insights: string[] = [];
 
-function createMindMap(title: string, initialBranchTitle = "开篇"): MindElixirData {
-  return normalizeMindMapData(MindElixir.new(title), title, initialBranchTitle);
-}
-
-function createCourse(title: string, category: string, description: string, initialBranchTitle = "开篇"): Course {
-  return {
-    id: crypto.randomUUID(),
-    title,
-    category,
-    description,
-    progress: 0,
-    createdAt: new Date().toISOString(),
-    mindMap: createMindMap(title, initialBranchTitle),
-    knowledgePoints: {},
-    knowledgeDocuments: {},
-    branchMindMaps: {},
-    syncNumberedOutline: true,
-    numberedOutlineSnapshot: [],
-    collapsedOutlineIds: [],
-    hideParentKnowledgePages: false
-  };
-}
-
 function loadCourseCollection(collection: CourseCollectionConfig): Course[] {
   try {
     const raw = localStorage.getItem(collection.storageKey);
@@ -607,43 +556,6 @@ function loadCourseCollection(collection: CourseCollectionConfig): Course[] {
   } catch {
     return [];
   }
-}
-
-function normalizeMindMapData(value: MindElixirData | null | undefined, title: string, initialBranchTitle = "开篇"): MindElixirData {
-  const source = value?.nodeData ? value : MindElixir.new(title);
-  const data = JSON.parse(JSON.stringify(source)) as MindElixirData;
-  data.nodeData = data.nodeData ?? MindElixir.new(title).nodeData;
-  data.nodeData.id = data.nodeData.id || crypto.randomUUID();
-  data.nodeData.topic = data.nodeData.topic || title;
-  data.nodeData.children = Array.isArray(data.nodeData.children) ? data.nodeData.children : [];
-
-  if (data.nodeData.children.length === 0) {
-    data.nodeData.children.push({
-      id: crypto.randomUUID(),
-      topic: initialBranchTitle
-    } as NodeObj);
-  }
-
-  return data;
-}
-
-function normalizeCourses(value: unknown, initialBranchTitle = "开篇"): Course[] {
-  if (!Array.isArray(value)) return [];
-  return value.map((course) => {
-    const record = course as Course;
-    const mindMap = normalizeMindMapData(record.mindMap, record.title, initialBranchTitle);
-    return {
-      ...record,
-      mindMap,
-      knowledgePoints: record.knowledgePoints ?? {},
-      knowledgeDocuments: record.knowledgeDocuments ?? {},
-      branchMindMaps: record.branchMindMaps ?? {},
-      syncNumberedOutline: record.syncNumberedOutline ?? true,
-      numberedOutlineSnapshot: record.numberedOutlineSnapshot ?? buildOutline(mindMap),
-      collapsedOutlineIds: record.collapsedOutlineIds ?? [],
-      hideParentKnowledgePages: record.hideParentKnowledgePages ?? false
-    };
-  });
 }
 
 function readPersistedCourseCollectionPayload(value: unknown, collection: CourseCollectionConfig): Course[] | null {
@@ -759,104 +671,11 @@ function scheduleIdleTask(task: () => void, timeout = 500) {
   return () => globalThis.clearTimeout(timeoutId);
 }
 
-function escapeHtml(value: string) {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
 function renderMindMapText(value: string) {
   return escapeHtml(value)
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\[color=(#[0-9a-fA-F]{3,6})\](.+?)\[\/color\]/g, '<span style="color:$1">$2</span>')
     .replace(/\[mark=(#[0-9a-fA-F]{3,6})\](.+?)\[\/mark\]/g, '<mark style="background:$1">$2</mark>');
-}
-
-function buildOutline(data: MindElixirData): OutlineItem[] {
-  const items: OutlineItem[] = [];
-
-  const getNumbering = (depth: number, index: number): string => {
-    // depth=0 是章节标题，不加序号
-    if (depth === 0) return "";
-    if (depth === 1) {
-      // 一、二、三...
-      const nums = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
-        "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十"];
-      const num = index + 1;
-      return num <= 20 ? `${nums[num - 1]}、` : `${num}、`;
-    }
-    if (depth === 2) {
-      // （一）（二）（三）...
-      const nums = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
-        "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十"];
-      const num = index + 1;
-      return num <= 20 ? `（${nums[num - 1]}）` : `（${num}）`;
-    }
-    if (depth === 3) {
-      // 1. 2. 3. ...
-      return `${index + 1}.`;
-    }
-    // depth >= 4: 1) 2) 3) ...
-    return `${index + 1})`;
-  };
-
-  const walk = (nodes: NodeObj[] | undefined, depth: number, parentId: string) => {
-    if (!nodes) return;
-    nodes.forEach((node, index) => {
-      const numbering = getNumbering(depth, index);
-      items.push({ id: node.id, topic: node.topic, depth, parentId, numbering });
-      walk(node.children, depth + 1, node.id);
-    });
-  };
-
-  walk(data.nodeData.children, 0, data.nodeData.id);
-  return items;
-}
-
-const outlineDirectoryFreezeDepth = 3;
-
-function applyNumberedOutlineSnapshot(nextOutline: OutlineItem[], snapshot: OutlineItem[]) {
-  const snapshotItems = new Map(snapshot.map((item) => [item.id, item]));
-  const frozenIds = new Set(
-    snapshot
-      .filter((item) => item.depth >= outlineDirectoryFreezeDepth)
-      .map((item) => item.id)
-  );
-
-  return nextOutline
-    .filter((item) => item.depth < outlineDirectoryFreezeDepth || frozenIds.has(item.id))
-    .map((item) => {
-      if (item.depth < outlineDirectoryFreezeDepth) return item;
-      const frozenItem = snapshotItems.get(item.id);
-      return frozenItem
-        ? { ...item, topic: frozenItem.topic, numbering: frozenItem.numbering }
-        : item;
-    });
-}
-
-function getVisibleOutline(outline: OutlineItem[], collapsedIds: string[]) {
-  const collapsedSet = new Set(collapsedIds);
-  const hiddenParentIds = new Set<string>();
-
-  return outline.filter((item) => {
-    if (hiddenParentIds.has(item.parentId)) {
-      hiddenParentIds.add(item.id);
-      return false;
-    }
-
-    if (collapsedSet.has(item.id)) {
-      hiddenParentIds.add(item.id);
-    }
-
-    return true;
-  });
-}
-
-function getOutlineParentIds(outline: OutlineItem[]) {
-  return new Set(outline.map((item) => item.parentId));
 }
 
 function hasKnowledgeContent(rawHtml: string | undefined) {
@@ -868,47 +687,17 @@ function hasKnowledgeContent(rawHtml: string | undefined) {
   return Boolean(container.querySelector("img, svg, canvas, table, ul, ol, li, .knowledge-flowchart, .knowledge-branch-map"));
 }
 
-function findMindMapNode(root: NodeObj, nodeId: string): NodeObj | null {
-  if (root.id === nodeId) return root;
-  for (const child of root.children ?? []) {
-    const match = findMindMapNode(child, nodeId);
-    if (match) return match;
-  }
-  return null;
+function hasCanvasElementContent(value: unknown): boolean {
+  if (typeof value === "string") return value.replace(/\u00a0/g, " ").trim().length > 0;
+  if (Array.isArray(value)) return value.some(hasCanvasElementContent);
+  if (!value || typeof value !== "object") return false;
+  return Object.values(value as Record<string, unknown>).some(hasCanvasElementContent);
 }
 
-function cloneMindData(data: MindElixirData): MindElixirData {
-  return JSON.parse(JSON.stringify(data)) as MindElixirData;
-}
-
-function createBranchMindMapFromNode(node: NodeObj): MindElixirData {
-  return {
-    nodeData: JSON.parse(JSON.stringify(node)) as NodeObj,
-    arrows: [],
-    summaries: [],
-    direction: SIDE
-  } as MindElixirData;
-}
-
-function renderBranchList(nodes: NodeObj[] | undefined): string {
-  if (!nodes || nodes.length === 0) return "";
-  return `<ul>${nodes
-    .map((node) => `<li><span>${escapeHtml(node.topic)}</span>${renderBranchList(node.children)}</li>`)
-    .join("")}</ul>`;
-}
-
-function renderKnowledgeBranchHtml(branch: NodeObj): string {
-  return [
-    '<section class="knowledge-branch-map" contenteditable="false">',
-    '<button class="branch-map-close" type="button" aria-label="Close branch mind map">&times;</button>',
-    '<div class="branch-map-heading">',
-    '<span>分支思维导图</span>',
-    `<strong>${escapeHtml(branch.topic)}</strong>`,
-    "</div>",
-    renderBranchList(branch.children) || '<p class="branch-map-empty">暂无子节点</p>',
-    "</section>",
-    "<p><br></p>"
-  ].join("");
+function hasKnowledgeDocumentContent(document: KnowledgeCanvasDocument | null | undefined) {
+  if (!document) return false;
+  if (hasKnowledgeContent(document.html)) return true;
+  return hasCanvasElementContent(document.data?.main);
 }
 
 function createDefaultFlowchart(): KnowledgeFlowchart {
@@ -1034,43 +823,6 @@ function parseKnowledgeFlowchart(element: Element): KnowledgeFlowchart {
   } catch {
     return createDefaultFlowchart();
   }
-}
-
-function normalizeTag(tag: NonNullable<NodeObj["tags"]>[number]) {
-  return typeof tag === "string" ? tag : tag.text;
-}
-
-function buildNoteEntries(data: MindElixirData): NoteEntry[] {
-  const entries: NoteEntry[] = [];
-  let order = 1;
-  const walk = (
-    nodes: NodeObj[] | undefined,
-    depth: number,
-    parentId: string,
-    parentPath: Array<{ id: string; topic: string; depth: number }>
-  ) => {
-    nodes?.forEach((node) => {
-      const path = [...parentPath, { id: node.id, topic: node.topic, depth }];
-      const childTopics = (node.children ?? []).map((child) => child.topic);
-      entries.push({
-        id: node.id,
-        topic: node.topic,
-        depth,
-        parentId,
-        path,
-        note: node.note ?? "",
-        tags: (node.tags ?? []).map(normalizeTag).filter(Boolean),
-        childTopics,
-        isLeaf: childTopics.length === 0,
-        order
-      });
-      order += 1;
-      walk(node.children, depth + 1, node.id, path);
-    });
-  };
-
-  walk(data.nodeData.children, 0, data.nodeData.id, []);
-  return entries;
 }
 
 function useCourseCollectionStore(collection: CourseCollectionConfig) {
@@ -2651,6 +2403,8 @@ function MindMapEditor({
   const mainMindDataRef = useRef(data);
   const branchMindMapsRef = useRef(branchMindMaps);
   const selectedPageIdRef = useRef(data.nodeData.id);
+  const previousModeRef = useRef(mode);
+  const manualCollapseGuardRef = useRef(0);
   const upstreamBranchIsolationRef = useRef(false);
   const downstreamBranchIsolationRef = useRef(false);
   const activeBranchCanvasIdRef = useRef<string | null>(null);
@@ -2658,6 +2412,8 @@ function MindMapEditor({
   const numberedOutlineSnapshotRef = useRef<OutlineItem[]>(
     persistedNumberedOutlineSnapshot.length > 0 ? persistedNumberedOutlineSnapshot : buildOutline(data)
   );
+  const outlineParentIds = useMemo(() => getOutlineParentIds(outline), [outline]);
+  const outlineParentIdsRef = useRef(outlineParentIds);
 
   useEffect(() => {
     onChangeRef.current = onChange;
@@ -2695,6 +2451,10 @@ function MindMapEditor({
     syncNumberedOutlineRef.current = syncNumberedOutline;
   }, [syncNumberedOutline]);
 
+  useEffect(() => {
+    outlineParentIdsRef.current = outlineParentIds;
+  }, [outlineParentIds]);
+
   const persistOutlineSyncState = (nextSyncState: boolean, nextSnapshot: OutlineItem[]) => {
     syncNumberedOutlineRef.current = nextSyncState;
     numberedOutlineSnapshotRef.current = nextSnapshot;
@@ -2716,10 +2476,11 @@ function MindMapEditor({
     setNoteEntries(buildNoteEntries(nextData));
   };
 
-  const getBranchMindData = (nodeId: string) => {
+  const getBranchMindData = (nodeId: string, preferMainSnapshot = false) => {
+    const branchNode = findMindMapNode(mainMindDataRef.current.nodeData, nodeId);
+    if (preferMainSnapshot && branchNode) return createBranchMindMapFromNode(branchNode);
     const storedBranch = branchMindMapsRef.current[nodeId];
     if (storedBranch) return cloneMindData(storedBranch);
-    const branchNode = findMindMapNode(mainMindDataRef.current.nodeData, nodeId);
     return branchNode ? createBranchMindMapFromNode(branchNode) : null;
   };
 
@@ -2753,16 +2514,73 @@ function MindMapEditor({
     onBranchMindMapChangeRef.current(nodeId, savedData);
   };
 
+  const persistBranchCanvasData = (
+    branchCanvasId: string,
+    nextData: MindElixirData,
+    options: { refreshOutline?: boolean; showHint?: boolean } = {}
+  ) => {
+    const shouldRefreshOutline = options.refreshOutline !== false;
+    const shouldShowHint = options.showHint !== false;
+    saveBranchMindMap(branchCanvasId, nextData);
+    syncDescendantBranchMindMaps(nextData.nodeData);
+
+    if (upstreamBranchIsolationRef.current) {
+      if (shouldShowHint) setToolHint("上分支隔离已开启：仅保存当前分支");
+      return;
+    }
+
+    const nextMainData = updateMindMapBranch(mainMindDataRef.current, branchCanvasId, nextData.nodeData);
+    mainMindDataRef.current = nextMainData;
+    if (shouldRefreshOutline) refreshOutlineViews(nextMainData);
+    onChangeRef.current(nextMainData);
+    if (shouldShowHint) setToolHint("");
+  };
+
+  const getPersistingBranchCanvasId = (nextData: MindElixirData) => {
+    const activeBranchId = activeBranchCanvasIdRef.current;
+    const mainRootId = mainMindDataRef.current.nodeData.id;
+    const canvasRootId = nextData.nodeData.id;
+
+    if (activeBranchId && activeBranchId === canvasRootId) return activeBranchId;
+    return canvasRootId !== mainRootId ? canvasRootId : null;
+  };
+
+  const persistPossiblyBranchedMindData = (
+    nextData: MindElixirData,
+    options: { refreshOutline?: boolean; showHint?: boolean } = {}
+  ) => {
+    const shouldRefreshOutline = options.refreshOutline !== false;
+    const branchCanvasId = getPersistingBranchCanvasId(nextData);
+    if (branchCanvasId) {
+      activeBranchCanvasIdRef.current = branchCanvasId;
+      persistBranchCanvasData(branchCanvasId, nextData, options);
+      return;
+    }
+
+    mainMindDataRef.current = nextData;
+    if (shouldRefreshOutline) refreshOutlineViews(nextData);
+    onChangeRef.current(nextData);
+    syncDescendantBranchMindMaps(nextData.nodeData);
+  };
+
+  const applyReadableMindMapScale = (mind: MindElixirInstance) => {
+    const currentScale = Number(mind.scaleVal);
+    if (!Number.isFinite(currentScale) || currentScale < readableMindMapDefaultScale) {
+      mind.scale(readableMindMapDefaultScale);
+    }
+  };
+
   const fitMindMapViewport = (mind: MindElixirInstance, focusId?: string) => {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const targetNode = focusId ? mind.findEle(focusId) : mind.findEle(mind.nodeData.id);
+        applyReadableMindMapScale(mind);
         if (targetNode) {
           mind.selectNode(targetNode);
           mind.scrollIntoView(targetNode, true);
+        } else {
+          mind.toCenter();
         }
-        mind.scaleFit();
-        mind.toCenter();
       });
     });
   };
@@ -2771,18 +2589,7 @@ function MindMapEditor({
     const mind = mindRef.current;
     if (!mind) return;
     const nextData = mind.getData();
-    const branchCanvasId = activeBranchCanvasIdRef.current;
-
-    if (branchCanvasId) {
-      saveBranchMindMap(branchCanvasId, nextData);
-      syncDescendantBranchMindMaps(nextData.nodeData);
-      return;
-    }
-
-    mainMindDataRef.current = nextData;
-    onChangeRef.current(nextData);
-    refreshOutlineViews(nextData);
-    syncDescendantBranchMindMaps(nextData.nodeData);
+    persistPossiblyBranchedMindData(nextData);
   };
 
   const openMainMindMap = (focusId?: string) => {
@@ -2796,6 +2603,7 @@ function MindMapEditor({
       const targetId = focusId ?? nextData.nodeData.id;
       const topic = mind.findEle(targetId);
       if (!topic) return;
+      applyReadableMindMapScale(mind);
       mind.selectNode(topic);
       if (targetId === nextData.nodeData.id) {
         fitMindMapViewport(mind, targetId);
@@ -2806,12 +2614,13 @@ function MindMapEditor({
     });
   };
 
-  const openIsolatedBranchMindMap = (nodeId: string) => {
+  const openIsolatedBranchMindMap = (nodeId: string, preferMainSnapshot = false) => {
     const mind = mindRef.current;
     if (!mind) return false;
-    const branchData = getBranchMindData(nodeId);
+    const branchData = getBranchMindData(nodeId, preferMainSnapshot);
     if (!branchData) return false;
     activeBranchCanvasIdRef.current = nodeId;
+    if (preferMainSnapshot) saveBranchMindMap(nodeId, branchData);
     mind.refresh(branchData);
     setSelectedNodeId(branchData.nodeData.id);
     setSelectedNodeCount(1);
@@ -2824,18 +2633,7 @@ function MindMapEditor({
   };
 
   const persistCurrentMindData = (nextData: MindElixirData) => {
-    const branchCanvasId = activeBranchCanvasIdRef.current;
-    if (branchCanvasId) {
-      saveBranchMindMap(branchCanvasId, nextData);
-      syncDescendantBranchMindMaps(nextData.nodeData);
-      setToolHint("上分支隔离已开启：仅保存当前分支");
-      return;
-    }
-
-    mainMindDataRef.current = nextData;
-    refreshOutlineViews(nextData);
-    onChangeRef.current(nextData);
-    syncDescendantBranchMindMaps(nextData.nodeData);
+    persistPossiblyBranchedMindData(nextData);
   };
 
   useEffect(() => {
@@ -2907,12 +2705,7 @@ function MindMapEditor({
 
     return () => {
       const nextData = mind.getData();
-      const branchCanvasId = activeBranchCanvasIdRef.current;
-      if (branchCanvasId) {
-        saveBranchMindMap(branchCanvasId, nextData);
-      } else {
-        onChangeRef.current(nextData);
-      }
+      persistPossiblyBranchedMindData(nextData, { refreshOutline: false, showHint: false });
       mind.destroy();
       mindRef.current = null;
     };
@@ -2927,6 +2720,7 @@ function MindMapEditor({
     requestAnimationFrame(() => {
       const topic = mind.findEle(id);
       if (!topic) return;
+      applyReadableMindMapScale(mind);
       mind.selectNode(topic);
       mind.focusNode(topic);
       mind.scrollIntoView(topic, true);
@@ -2939,10 +2733,20 @@ function MindMapEditor({
     setSelectedNodeId(id);
     setSelectedPageId(id);
     setSelectedNodeCount(1);
-    if (upstreamBranchIsolationRef.current && id !== mainMindDataRef.current.nodeData.id && openIsolatedBranchMindMap(id)) {
+    const isBranchNode = outlineParentIds.has(id);
+    if (
+      id !== mainMindDataRef.current.nodeData.id
+      && (isBranchNode || upstreamBranchIsolationRef.current)
+      && openIsolatedBranchMindMap(id, isBranchNode && !upstreamBranchIsolationRef.current)
+    ) {
       return;
     }
     if (isIsolatedBranchSession()) {
+      openMainMindMap(id);
+      return;
+    }
+    const currentCanvasRoot = mindRef.current?.nodeData;
+    if (activeBranchCanvasIdRef.current && currentCanvasRoot && !findMindMapNode(currentCanvasRoot, id)) {
       openMainMindMap(id);
       return;
     }
@@ -2966,12 +2770,11 @@ function MindMapEditor({
       mind.cancelFocus();
     }
     const rootNode = mind.findEle(rootNodeId);
+    applyReadableMindMapScale(mind);
     if (rootNode) {
       mind.selectNode(rootNode);
       mind.scrollIntoView(rootNode, true);
     }
-    mind.scaleFit();
-    mind.toCenter();
     const nextData = mind.getData();
     persistCurrentMindData(nextData);
   };
@@ -2985,7 +2788,14 @@ function MindMapEditor({
       focusRootMindMap();
       return;
     }
-    if (upstreamBranchIsolationRef.current && openIsolatedBranchMindMap(selectedPageId)) {
+    if (
+      selectedPageId !== rootNodeId
+      && (outlineParentIdsRef.current.has(selectedPageId) || upstreamBranchIsolationRef.current)
+      && openIsolatedBranchMindMap(
+        selectedPageId,
+        outlineParentIdsRef.current.has(selectedPageId) && !upstreamBranchIsolationRef.current
+      )
+    ) {
       return;
     }
     focusMindNode(selectedPageId);
@@ -3428,17 +3238,35 @@ function MindMapEditor({
   const activeBranchNode = branchMindMaps[activePageId]?.nodeData ?? findMindMapNode(data.nodeData, activePageId);
   const activeOutlineItem = outline.find((item) => item.id === activePageId);
   const activeTopic = activeBranchNode?.topic ?? activeOutlineItem?.topic ?? title;
-  const outlineParentIds = useMemo(() => getOutlineParentIds(outline), [outline]);
+  const activeBranchHasChildren = Boolean(activeBranchNode?.children?.length);
+  const activeDocumentIsStaleBranchOutline = isStaleGeneratedBranchDocument(activeKnowledgeDocument, activeBranchNode);
+  const activeDocumentHasContent = hasKnowledgeDocumentContent(activeKnowledgeDocument);
+  const shouldShowAutoBranchOutline =
+    activeBranchHasChildren && (!activeDocumentHasContent || activeDocumentIsStaleBranchOutline) && !hasKnowledgeContent(activeKnowledge);
+  const activeKnowledgePanelValue = shouldShowAutoBranchOutline && activeBranchNode
+    ? renderCanvasMindBranchHtml(activeBranchNode)
+    : activeKnowledge;
+  const activeKnowledgePanelDocument = shouldShowAutoBranchOutline ? null : activeKnowledgeDocument;
   const visibleOutline = useMemo(() => getVisibleOutline(outline, collapsedOutlineIds), [outline, collapsedOutlineIds]);
-  const isKnowledgePageSelectable = (pageId: string) => !hideParentKnowledgePages || !outlineParentIds.has(pageId);
+  const hasKnowledgePageContent = (pageId: string) =>
+    hasKnowledgeContent(knowledgePoints[pageId]) || hasKnowledgeDocumentContent(knowledgeDocuments[pageId]);
+  const isKnowledgePageSelectable = (pageId: string) =>
+    !hideParentKnowledgePages || !outlineParentIds.has(pageId) || hasKnowledgePageContent(pageId);
   const knowledgeContentPageIds = useMemo(
     () =>
       outline
-        .filter((item) => hasKnowledgeContent(knowledgePoints[item.id]) && (!hideParentKnowledgePages || !outlineParentIds.has(item.id)))
+        .filter((item) => hasKnowledgePageContent(item.id) && isKnowledgePageSelectable(item.id))
         .map((item) => item.id),
-    [hideParentKnowledgePages, knowledgePoints, outline, outlineParentIds]
+    [hideParentKnowledgePages, knowledgeDocuments, knowledgePoints, outline, outlineParentIds]
   );
   const knowledgeContentPageIdSet = useMemo(() => new Set(knowledgeContentPageIds), [knowledgeContentPageIds]);
+  const firstKnowledgePageId = useMemo(
+    () =>
+      knowledgeContentPageIds[0]
+      ?? outline.find((item) => isKnowledgePageSelectable(item.id))?.id
+      ?? null,
+    [hideParentKnowledgePages, knowledgeContentPageIds, outline, outlineParentIds]
+  );
   const activeOutlineIndex = outline.findIndex((item) => item.id === activePageId);
   const previousKnowledgePageId = (() => {
     if (activeOutlineIndex <= 0) return null;
@@ -3471,6 +3299,37 @@ function MindMapEditor({
     }
     return null;
   };
+  const findFirstContentDescendant = (itemId: string) => {
+    const startIndex = outline.findIndex((item) => item.id === itemId);
+    if (startIndex < 0) return null;
+    const parentDepth = outline[startIndex].depth;
+    for (let index = startIndex + 1; index < outline.length; index += 1) {
+      const candidate = outline[index];
+      if (candidate.depth <= parentDepth) break;
+      if (knowledgeContentPageIdSet.has(candidate.id)) return candidate.id;
+    }
+    return null;
+  };
+  const findNearestContentAncestor = (itemId: string) => {
+    const byId = new Map(outline.map((item) => [item.id, item]));
+    let current = byId.get(itemId);
+    while (current) {
+      const parent = byId.get(current.parentId);
+      if (!parent) return null;
+      if (hasKnowledgePageContent(parent.id)) return parent.id;
+      current = parent;
+    }
+    return null;
+  };
+  const isOutlineDescendant = (parentId: string, childId: string) => {
+    const byId = new Map(outline.map((item) => [item.id, item]));
+    let current = byId.get(childId);
+    while (current) {
+      if (current.parentId === parentId) return true;
+      current = byId.get(current.parentId);
+    }
+    return false;
+  };
   const handleHideParentKnowledgePagesChange = () => {
     const nextValue = !hideParentKnowledgePages;
     onHideParentKnowledgePagesChange(nextValue);
@@ -3479,13 +3338,68 @@ function MindMapEditor({
     if (nextPageId) focusOutlineNode(nextPageId);
   };
 
+  useEffect(() => {
+    if (mode !== "knowledge" || !firstKnowledgePageId) return;
+    const collapseGuardActive = Date.now() - manualCollapseGuardRef.current < 500;
+    if (collapseGuardActive) return;
+
+    const enteredKnowledgeMode = previousModeRef.current !== "knowledge";
+    const activeIsRoot = activePageId === rootNodeId;
+    const activeIsDisabledParent = !isKnowledgePageSelectable(activePageId);
+    const activeHasContent = hasKnowledgePageContent(activePageId);
+    const nearestContentAncestorId = findNearestContentAncestor(activePageId);
+    const activeIsEmptyPageFromModeSwitch = enteredKnowledgeMode && !activeHasContent && Boolean(nearestContentAncestorId);
+    if (!activeIsRoot && !activeIsDisabledParent && !activeIsEmptyPageFromModeSwitch) return;
+
+    const targetPageId = activeIsDisabledParent
+      ? findFirstContentDescendant(activePageId) ?? firstKnowledgePageId
+      : activeIsEmptyPageFromModeSwitch
+        ? nearestContentAncestorId ?? firstKnowledgePageId
+        : firstKnowledgePageId;
+
+    const ancestorIds = getOutlineAncestorIds(outline, targetPageId);
+    const nextCollapsedIds = collapsedOutlineIds.filter((id) => !ancestorIds.has(id));
+    if (nextCollapsedIds.length !== collapsedOutlineIds.length) {
+      setCollapsedOutlineIds(nextCollapsedIds);
+      onCollapsedOutlineChange(nextCollapsedIds);
+    }
+
+    selectedPageIdRef.current = targetPageId;
+    setSelectedPageId(targetPageId);
+    setSelectedNodeId(targetPageId);
+    setSelectedNodeCount(1);
+  }, [
+    activePageId,
+    collapsedOutlineIds,
+    firstKnowledgePageId,
+    hideParentKnowledgePages,
+    knowledgeDocuments,
+    knowledgePoints,
+    mode,
+    onCollapsedOutlineChange,
+    outline,
+    outlineParentIds,
+    rootNodeId
+  ]);
+
+  useEffect(() => {
+    previousModeRef.current = mode;
+  }, [mode]);
+
   const toggleOutlineCollapse = (itemId: string) => {
     const isCollapsed = collapsedOutlineIds.includes(itemId);
     const nextIds = isCollapsed
       ? collapsedOutlineIds.filter((id) => id !== itemId)
       : [...collapsedOutlineIds, itemId];
+    manualCollapseGuardRef.current = Date.now();
     setCollapsedOutlineIds(nextIds);
     onCollapsedOutlineChange(nextIds);
+    if (!isCollapsed && activePageId !== itemId && isOutlineDescendant(itemId, activePageId)) {
+      selectedPageIdRef.current = itemId;
+      setSelectedPageId(itemId);
+      setSelectedNodeId(itemId);
+      setSelectedNodeCount(1);
+    }
   };
 
   const buildAiSystemContextMessage = (systemContext: SystemContextInfo) => {
@@ -3605,7 +3519,7 @@ function MindMapEditor({
                   `depth-${Math.min(item.depth, 5)}`,
                   item.numbering ? "has-numbering" : "",
                   hasChildren ? "has-children" : "",
-                  hideParentKnowledgePages && hasChildren ? "knowledge-page-disabled" : "",
+                  mode !== "mindmap" && hideParentKnowledgePages && hasChildren ? "knowledge-page-disabled" : "",
                   isCollapsed ? "collapsed" : "",
                   activePageId === item.id ? "active" : "",
                   draggingOutlineId === item.id ? "dragging" : "",
@@ -3641,7 +3555,7 @@ function MindMapEditor({
                   if (draggedId) reorderOutlineNode(draggedId, item.id);
                 }}
                 onClick={() => {
-                  if (hideParentKnowledgePages && hasChildren) {
+                  if (mode !== "mindmap" && hideParentKnowledgePages && hasChildren) {
                     toggleOutlineCollapse(item.id);
                     return;
                   }
@@ -3650,13 +3564,13 @@ function MindMapEditor({
                 onKeyDown={(event) => {
                   if (event.key !== "Enter" && event.key !== " ") return;
                   event.preventDefault();
-                  if (hideParentKnowledgePages && hasChildren) {
+                  if (mode !== "mindmap" && hideParentKnowledgePages && hasChildren) {
                     toggleOutlineCollapse(item.id);
                     return;
                   }
                   focusOutlineNode(item.id);
                 }}
-                title={hideParentKnowledgePages && hasChildren ? "父级知识点页已关闭" : item.topic}
+                title={mode !== "mindmap" && hideParentKnowledgePages && hasChildren ? "父级知识点页已关闭" : item.topic}
                 style={{ paddingLeft: `${8 + item.depth * 22 + (item.depth >= 3 ? 16 : 0)}px` }}
               >
                 {hasChildren ? (
@@ -3714,9 +3628,10 @@ function MindMapEditor({
           <CanvasKnowledgePanel
             nodeId={activePageId}
             topic={activeTopic}
-            value={activeKnowledge}
-            document={activeKnowledgeDocument}
+            value={activeKnowledgePanelValue}
+            document={activeKnowledgePanelDocument}
             branchNode={activeBranchNode}
+            isAutoOutline={shouldShowAutoBranchOutline}
             knowledgeFormatBrush={knowledgeFormatBrush}
             onKnowledgeFormatBrushChange={onKnowledgeFormatBrushChange}
             onKnowledgeChange={onKnowledgeChange}
@@ -4650,6 +4565,36 @@ function getCanvasDocumentInitialData(
   return normalizeCanvasKnowledgeData(createCanvasDataFromHtml(html), { resetLegacyJustify: true });
 }
 
+function collectCanvasKnowledgeText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(collectCanvasKnowledgeText).join(" ");
+  if (!value || typeof value !== "object") return "";
+  return Object.values(value as Record<string, unknown>).map(collectCanvasKnowledgeText).join(" ");
+}
+
+function getCanvasDocumentText(canvasDocument: KnowledgeCanvasDocument | null) {
+  if (!canvasDocument) return "";
+  return `${canvasDocument.html ?? ""} ${collectCanvasKnowledgeText(canvasDocument.data?.main)}`.replace(/\s+/g, " ").trim();
+}
+
+function looksLikeGeneratedBranchOutline(canvasDocument: KnowledgeCanvasDocument | null) {
+  const html = canvasDocument?.html ?? "";
+  return (
+    html.includes('data-aistudy-auto-branch-outline="true"') ||
+    html.includes("knowledge-branch-map")
+  );
+}
+
+function isStaleGeneratedBranchDocument(canvasDocument: KnowledgeCanvasDocument | null, branchNode: NodeObj | null) {
+  if (!canvasDocument || !branchNode) return false;
+  const text = getCanvasDocumentText(canvasDocument);
+  if (!looksLikeGeneratedBranchOutline(canvasDocument)) return false;
+  if (!text.includes(branchNode.topic)) return true;
+  const children = branchNode.children ?? [];
+  if (children.length === 0) return false;
+  return !children.some((child) => text.includes(child.topic));
+}
+
 function renderCanvasMindBranchList(nodes: NodeObj[] | undefined): string {
   if (!nodes || nodes.length === 0) return "";
   return `<ul>${nodes
@@ -4659,7 +4604,7 @@ function renderCanvasMindBranchList(nodes: NodeObj[] | undefined): string {
 
 function renderCanvasMindBranchHtml(branch: NodeObj) {
   return [
-    `<h2>思维导图：${escapeHtml(branch.topic)}</h2>`,
+    `<h2 data-aistudy-auto-branch-outline="true">思维导图：${escapeHtml(branch.topic)}</h2>`,
     renderCanvasMindBranchList(branch.children) || "<p>暂无子分支</p>"
   ].join("");
 }
@@ -4670,6 +4615,7 @@ function CanvasKnowledgePanel({
   value,
   document: canvasDocument,
   branchNode,
+  isAutoOutline,
   knowledgeFormatBrush,
   onKnowledgeFormatBrushChange,
   onKnowledgeChange,
@@ -4686,6 +4632,7 @@ function CanvasKnowledgePanel({
   value: string;
   document: KnowledgeCanvasDocument | null;
   branchNode: NodeObj | null;
+  isAutoOutline: boolean;
   knowledgeFormatBrush: KnowledgeFormatBrush | null;
   onKnowledgeFormatBrushChange: (format: KnowledgeFormatBrush | null) => void;
   onKnowledgeChange: (nodeId: string, content: string) => void;
@@ -4703,12 +4650,15 @@ function CanvasKnowledgePanel({
   const saveTimerRef = useRef<number | null>(null);
   const lastSavedHtmlRef = useRef(value);
   const lastRangeRef = useRef<IRange | null>(null);
+  const initialAutoOutlineRef = useRef(isAutoOutline);
+  const hasUserEditedAutoOutlineRef = useRef(false);
   const [rangeStyle, setRangeStyle] = useState<Partial<IRangeStyle>>({});
   const [canvasFormatBrush, setCanvasFormatBrush] = useState<CanvasKnowledgeFormatBrush | null>(null);
 
   const persistCanvasDocument = useCallback((reason = "content-change") => {
     const editor = editorRef.current;
     if (!editor) return;
+    if (initialAutoOutlineRef.current && !hasUserEditedAutoOutlineRef.current) return;
     const result = editor.command.getValue({ extraPickAttrs: canvasKnowledgeExtraPickAttrs });
     const htmlResult = editor.command.getHTML();
     const html = htmlResult.main || "";
@@ -4755,8 +4705,13 @@ function CanvasKnowledgePanel({
     };
     const editor = new CanvasEditor(container, initialData, initialOptions);
     editorRef.current = editor;
+    initialAutoOutlineRef.current = isAutoOutline;
+    hasUserEditedAutoOutlineRef.current = false;
     lastSavedHtmlRef.current = canvasDocument?.html ?? value;
-    editor.listener.contentChange = () => schedulePersist("content-change");
+    editor.listener.contentChange = () => {
+      hasUserEditedAutoOutlineRef.current = true;
+      schedulePersist("content-change");
+    };
     editor.listener.rangeStyleChange = (payload) => {
       setRangeStyle(payload);
       const range = editor.command.getRange();
@@ -4777,7 +4732,7 @@ function CanvasKnowledgePanel({
       editorRef.current = null;
       container.innerHTML = "";
     };
-  }, [canvasDocument?.nodeId, nodeId]);
+  }, [canvasDocument?.nodeId, isAutoOutline, nodeId]);
 
   useEffect(() => {
     const editor = editorRef.current;
