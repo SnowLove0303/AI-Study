@@ -143,6 +143,54 @@ export function createBranchMindMapFromNode(node: NodeObj): MindElixirData {
   } as MindElixirData;
 }
 
+function getNodeStructureSignature(node: NodeObj): string {
+  return JSON.stringify({
+    id: node.id,
+    topic: node.topic,
+    children: (node.children ?? []).map(getNodeStructureSignature)
+  });
+}
+
+export function isBranchMindMapFresh(data: MindElixirData, nodeId: string, branchMap: MindElixirData | null | undefined) {
+  const currentNode = findMindMapNode(data.nodeData, nodeId);
+  const branchRoot = branchMap?.nodeData;
+  if (!currentNode || !branchRoot || branchRoot.id !== nodeId) return false;
+  return getNodeStructureSignature(branchRoot) === getNodeStructureSignature(currentNode);
+}
+
+export function isBranchMindMapRootAligned(data: MindElixirData, nodeId: string, branchMap: MindElixirData | null | undefined) {
+  const currentNode = findMindMapNode(data.nodeData, nodeId);
+  const branchRoot = branchMap?.nodeData;
+  if (!currentNode || !branchRoot || branchRoot.id !== nodeId) return false;
+  return branchRoot.topic === currentNode.topic;
+}
+
+export function reconcileBranchMindMaps(
+  data: MindElixirData,
+  branchMindMaps: Record<string, MindElixirData> | null | undefined
+) {
+  const nextBranchMindMaps: Record<string, MindElixirData> = {};
+  for (const [nodeId, branchMap] of Object.entries(branchMindMaps ?? {})) {
+    if (isBranchMindMapRootAligned(data, nodeId, branchMap)) {
+      nextBranchMindMaps[nodeId] = cloneMindData(branchMap);
+    }
+  }
+  return nextBranchMindMaps;
+}
+
+export function reconcileFreshBranchMindMaps(
+  data: MindElixirData,
+  branchMindMaps: Record<string, MindElixirData> | null | undefined
+) {
+  const nextBranchMindMaps: Record<string, MindElixirData> = {};
+  for (const [nodeId, branchMap] of Object.entries(branchMindMaps ?? {})) {
+    if (isBranchMindMapFresh(data, nodeId, branchMap)) {
+      nextBranchMindMaps[nodeId] = cloneMindData(branchMap);
+    }
+  }
+  return nextBranchMindMaps;
+}
+
 function replaceMindMapNode(root: NodeObj, nodeId: string, replacement: NodeObj): NodeObj {
   if (root.id === nodeId) return JSON.parse(JSON.stringify(replacement)) as NodeObj;
   return {

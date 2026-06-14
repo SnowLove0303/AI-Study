@@ -9,6 +9,14 @@ export type UpdateLogEntry = {
 
 export const updateLog: UpdateLogEntry[] = [
   {
+    version: "1.2.167",
+    date: "2026-06-14",
+    title: "分支缓存回流保护",
+    featureUpdates: ["目录继续按主思维导图实时同步删除和新增的子级"],
+    fixes: ["修复旧分支缓存可能在切换或保存后把已删除子级重新写回的问题"],
+    optimizations: ["课程保存和启动加载会清理与主图结构不一致的分支缓存"]
+  },
+  {
     version: "1.2.166",
     date: "2026-06-14",
     title: "父子级折叠结构恢复",

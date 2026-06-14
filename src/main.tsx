@@ -96,7 +96,9 @@ import {
   getOutlineAncestorIds,
   getOutlineParentIds,
   getVisibleOutline,
+  isBranchMindMapFresh,
   readableMindMapDefaultScale,
+  reconcileFreshBranchMindMaps,
   renderKnowledgeBranchHtml,
   updateMindMapBranch
 } from "./domain/mindMap";
@@ -648,7 +650,10 @@ async function drainCourseCollectionSaveQueue(collection: CourseCollectionConfig
 }
 
 function saveCourseCollection(collection: CourseCollectionConfig, items: Course[]) {
-  const snapshot = JSON.parse(JSON.stringify(items)) as Course[];
+  const snapshot = normalizeCourses(
+    JSON.parse(JSON.stringify(items)) as Course[],
+    collection.labels.initialBranchTitle
+  );
   localStorage.setItem(collection.storageKey, JSON.stringify(snapshot));
 
   if (!collection.getApi()?.save) {
@@ -2594,10 +2599,15 @@ function CourseDetail({
           }
           onBranchMindMapChange={(nodeId, mindMap) =>
             onUpdateCourse(course.id, (currentCourse) => ({
-              branchMindMaps: {
-                ...(currentCourse.branchMindMaps ?? {}),
-                [nodeId]: mindMap
-              }
+              branchMindMaps: (() => {
+                const nextBranchMindMaps = { ...(currentCourse.branchMindMaps ?? {}) };
+                if (mindMap) {
+                  nextBranchMindMaps[nodeId] = mindMap;
+                } else {
+                  delete nextBranchMindMaps[nodeId];
+                }
+                return nextBranchMindMaps;
+              })()
             }))
           }
           onKnowledgeChange={(nodeId, content) =>
@@ -2663,7 +2673,7 @@ function MindMapEditor({
   onOutlineSyncStateChange: (syncNumberedOutline: boolean, numberedOutlineSnapshot: OutlineItem[]) => void;
   onCollapsedOutlineChange: (collapsedOutlineIds: string[]) => void;
   onHideParentKnowledgePagesChange: (hideParentKnowledgePages: boolean) => void;
-  onBranchMindMapChange: (nodeId: string, data: MindElixirData) => void;
+  onBranchMindMapChange: (nodeId: string, data: MindElixirData | null) => void;
   onKnowledgeChange: (nodeId: string, content: string) => void;
   onKnowledgeDocumentChange: (nodeId: string, document: KnowledgeCanvasDocument) => void;
   mindFormatBrush: MindFormatBrush | null;
@@ -2787,11 +2797,34 @@ function MindMapEditor({
     setNoteEntries(buildNoteEntries(nextData));
   };
 
+  const removeBranchMindMap = (nodeId: string) => {
+    if (!branchMindMapsRef.current[nodeId]) return;
+    const nextBranchMindMaps = { ...branchMindMapsRef.current };
+    delete nextBranchMindMaps[nodeId];
+    branchMindMapsRef.current = nextBranchMindMaps;
+    onBranchMindMapChangeRef.current(nodeId, null);
+  };
+
+  const pruneStaleBranchMindMaps = (nextData: MindElixirData) => {
+    const currentBranchMindMaps = branchMindMapsRef.current;
+    const nextBranchMindMaps = reconcileFreshBranchMindMaps(nextData, currentBranchMindMaps);
+    const staleIds = Object.keys(currentBranchMindMaps).filter((nodeId) => !nextBranchMindMaps[nodeId]);
+    if (staleIds.length === 0) return;
+
+    branchMindMapsRef.current = nextBranchMindMaps;
+    staleIds.forEach((nodeId) => onBranchMindMapChangeRef.current(nodeId, null));
+  };
+
   const getBranchMindData = (nodeId: string, preferMainSnapshot = false) => {
     const branchNode = findMindMapNode(mainMindDataRef.current.nodeData, nodeId);
     if (preferMainSnapshot && branchNode) return createBranchMindMapFromNode(branchNode);
     const storedBranch = branchMindMapsRef.current[nodeId];
-    if (storedBranch) return cloneMindData(storedBranch);
+    if (storedBranch) {
+      if (isBranchMindMapFresh(mainMindDataRef.current, nodeId, storedBranch)) {
+        return cloneMindData(storedBranch);
+      }
+      removeBranchMindMap(nodeId);
+    }
     return branchNode ? createBranchMindMapFromNode(branchNode) : null;
   };
 
@@ -2842,6 +2875,7 @@ function MindMapEditor({
 
     const nextMainData = updateMindMapBranch(mainMindDataRef.current, branchCanvasId, nextData.nodeData);
     mainMindDataRef.current = nextMainData;
+    pruneStaleBranchMindMaps(nextMainData);
     if (shouldRefreshOutline) refreshOutlineViews(nextMainData);
     onChangeRef.current(nextMainData);
     if (shouldShowHint) setToolHint("");
@@ -2869,9 +2903,10 @@ function MindMapEditor({
     }
 
     mainMindDataRef.current = nextData;
+    syncDescendantBranchMindMaps(nextData.nodeData);
+    pruneStaleBranchMindMaps(nextData);
     if (shouldRefreshOutline) refreshOutlineViews(nextData);
     onChangeRef.current(nextData);
-    syncDescendantBranchMindMaps(nextData.nodeData);
   };
 
   const applyReadableMindMapScale = (mind: MindElixirInstance) => {
@@ -3546,7 +3581,10 @@ function MindMapEditor({
   const canUseMultiNodeTool = selectedNodeCount >= 2;
   const activeKnowledge = knowledgePoints[activePageId] ?? "";
   const activeKnowledgeDocument = knowledgeDocuments[activePageId] ?? null;
-  const activeBranchNode = branchMindMaps[activePageId]?.nodeData ?? findMindMapNode(data.nodeData, activePageId);
+  const activeStoredBranch = branchMindMaps[activePageId];
+  const activeBranchNode = activeStoredBranch && isBranchMindMapFresh(data, activePageId, activeStoredBranch)
+    ? activeStoredBranch.nodeData
+    : findMindMapNode(data.nodeData, activePageId);
   const activeOutlineItem = outline.find((item) => item.id === activePageId);
   const activeTopic = activeBranchNode?.topic ?? activeOutlineItem?.topic ?? title;
   const activeBranchHasChildren = Boolean(activeBranchNode?.children?.length);

@@ -1,5 +1,5 @@
 import type { Course } from "./types";
-import { buildOutline, createMindMap, normalizeMindMapData } from "./mindMap";
+import { buildOutline, createMindMap, normalizeMindMapData, reconcileBranchMindMaps } from "./mindMap";
 
 export function createCourse(title: string, category: string, description: string, initialBranchTitle = "开篇"): Course {
   return {
@@ -25,12 +25,13 @@ export function normalizeCourses(value: unknown, initialBranchTitle = "开篇"):
   return value.map((course) => {
     const record = course as Course;
     const mindMap = normalizeMindMapData(record.mindMap, record.title, initialBranchTitle);
+    const branchMindMaps = reconcileBranchMindMaps(mindMap, record.branchMindMaps);
     return {
       ...record,
       mindMap,
       knowledgePoints: record.knowledgePoints ?? {},
       knowledgeDocuments: record.knowledgeDocuments ?? {},
-      branchMindMaps: record.branchMindMaps ?? {},
+      branchMindMaps,
       syncNumberedOutline: record.syncNumberedOutline ?? true,
       numberedOutlineSnapshot: record.numberedOutlineSnapshot ?? buildOutline(mindMap),
       collapsedOutlineIds: record.collapsedOutlineIds ?? [],

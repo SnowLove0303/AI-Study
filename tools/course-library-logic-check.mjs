@@ -38,6 +38,11 @@ const implementationRules = [
     markers: ["activeBranchId && activeBranchId === canvasRootId", "persistBranchCanvasData(branchCanvasId, nextData, options)"]
   },
   {
+    label: "stale branch caches are rejected before reuse",
+    file: "src/main.tsx",
+    markers: ["isBranchMindMapFresh(mainMindDataRef.current, nodeId, storedBranch)", "pruneStaleBranchMindMaps(nextData)"]
+  },
+  {
     label: "manual outline collapse has priority over auto focus",
     file: "src/main.tsx",
     markers: ["manualCollapseGuardRef", "if (collapseGuardActive) return"]
@@ -151,6 +156,14 @@ function collectTree(course) {
   return { nodes, duplicates };
 }
 
+function nodeStructureSignature(node) {
+  return JSON.stringify({
+    id: node?.id,
+    topic: node?.topic,
+    children: (node?.children || []).map(nodeStructureSignature)
+  });
+}
+
 function validateKnownFinanceTree(course, nodes) {
   const expectedNodes = {
     ea5c26347b08f32c: { parentId: "ea567e2d8636b864", depth: 1 },
@@ -167,7 +180,7 @@ function validateKnownFinanceTree(course, nodes) {
   for (const [id, expected] of Object.entries(expectedNodes)) {
     const actual = nodes.get(id);
     if (!actual) {
-      fail(`${course.title || course.id}: known finance node is missing: ${id}`);
+      note(`${course.title || course.id}: known finance node has been removed or rebuilt: ${id}`);
       continue;
     }
     if (actual.parentId !== expected.parentId || actual.depth !== expected.depth) {
@@ -278,6 +291,9 @@ function validateCourse(course, index) {
     }
     if (branchMap?.nodeData?.topic !== current.topic) {
       fail(`${label}: branchMindMaps[${id}] topic "${branchMap?.nodeData?.topic}" does not match tree topic "${current.topic}"`);
+    }
+    if (nodeStructureSignature(branchMap?.nodeData) !== nodeStructureSignature(current)) {
+      note(`${label}: branchMindMaps[${id}] keeps an isolated or stale subtree cache; runtime must reject it before normal sync reuse`);
     }
   }
 
