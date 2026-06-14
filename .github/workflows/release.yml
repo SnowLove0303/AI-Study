@@ -29,6 +29,7 @@ jobs:
 
       - name: Verify
         run: |
+          npm run release:verify-tag -- --tag=${{ github.ref_name }}
           npm run check:system
           npm run lint
 

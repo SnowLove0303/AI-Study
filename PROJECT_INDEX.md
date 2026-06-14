@@ -70,7 +70,7 @@ npm run dist
 release\win-unpacked\AIstudy.exe
 ```
 
-`npm run dist` 生成自动更新所需的 NSIS 安装包、`latest.yml` 和 blockmap。推送 `v*` 标签后，`.github/workflows/release.yml` 会在 GitHub Releases 发布这些文件。
+`npm run dist` 生成自动更新所需的 NSIS 安装包、`latest.yml` 和 blockmap。更新管理页会先生成发布草稿，草稿检查通过后才能确认发布到 GitHub Releases。
 
 不要再创建 `release-fixed`、`release-local-electron`、`release-mindmap-*`、`release-chatgpt-*` 等旁路目录。
 
@@ -81,11 +81,15 @@ release\win-unpacked\AIstudy.exe
 3. 执行 `npm run lint`。
 4. 执行 `npm run pack`。
 5. 从 `release\win-unpacked\AIstudy.exe` 启动验证。
-6. 正式发版时打标签并推送，例如 `git tag v1.2.162 && git push origin v1.2.162`。
-7. 确认 GitHub Releases 生成安装包和 `latest.yml`。
-8. 确认 `src/updateLog.ts` 最新版本可在更新管理中看到。
+6. 打开更新管理，刷新发布草稿。
+7. 确认 Git、版本记录、安装包、blockmap、`latest.yml`、远端同步、远端 tag 和 Release 检查全部通过。
+8. 点击确认发布。
+9. 确认 GitHub Releases 已生成安装包和 `latest.yml`。
+10. 确认 `src/updateLog.ts` 最新版本可在更新管理中看到。
 
 自动更新源必须对 B 设备匿名可见。若源码仓库是私有仓库，正式安装包应发布到公开 Release 仓库，再把 `package.json` 的 `build.publish.repo` 改为该公开仓库。
+
+回滚不覆盖同版本 Release。若线上版本异常，从上一个稳定 tag 恢复代码，提升版本号后重新发布，让 B 设备通过更高版本号安装修复包。
 
 ## 功能关系文档
 

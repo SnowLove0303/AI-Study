@@ -1,6 +1,6 @@
 {
   "name": "aistudy",
-  "version": "1.2.163",
+  "version": "1.2.164",
   "description": "AIstudy desktop learning system shell.",
   "author": "SnowLove0303",
   "private": true,
@@ -14,7 +14,8 @@
     "dist": "npm run build && electron-builder --win nsis",
     "lint": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "check:course-logic": "node tools/course-library-logic-check.mjs",
-    "check:system": "node tools/system-boundary-check.mjs && node tools/course-library-logic-check.mjs"
+    "check:system": "node tools/system-boundary-check.mjs && node tools/course-library-logic-check.mjs",
+    "release:verify-tag": "node tools/release-tag-check.mjs"
   },
   "dependencies": {
     "@hufe921/canvas-editor": "^0.9.135",

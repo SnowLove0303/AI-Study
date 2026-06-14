@@ -363,6 +363,29 @@ type AppUpdateStatus = {
   downloadPercent?: number;
   downloadedFile?: string;
 };
+type AppReleaseCheck = {
+  key: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+};
+type AppReleaseStatus = {
+  version: string;
+  tagName: string;
+  repository: string;
+  branch: string;
+  commit: string;
+  releaseUrl: string;
+  canPublish: boolean;
+  message: string;
+  checks: AppReleaseCheck[];
+};
+type AppReleasePublishResult = {
+  ok: boolean;
+  message: string;
+  releaseUrl?: string;
+  status?: AppReleaseStatus;
+};
 
 const mascotUrl = `${import.meta.env.BASE_URL}mascot.png`;
 const coursesStorageKey = "aistudy:courses:v1";
@@ -1608,9 +1631,13 @@ function UpdateManager() {
   const sortedUpdates = [...updateLog].sort((a, b) =>
     b.version.localeCompare(a.version, undefined, { numeric: true })
   );
-  const [openVersion, setOpenVersion] = useState(sortedUpdates[0]?.version ?? "");
+  const latestEntry = sortedUpdates[0];
+  const historyEntries = sortedUpdates.slice(1);
   const [updateStatus, setUpdateStatus] = useState<AppUpdateStatus | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  const [releaseStatus, setReleaseStatus] = useState<AppReleaseStatus | null>(null);
+  const [releaseBusy, setReleaseBusy] = useState(false);
+  const [publishResult, setPublishResult] = useState<AppReleasePublishResult | null>(null);
 
   const normalizeUpdateStatus = (value: unknown): AppUpdateStatus | null => {
     if (!value || typeof value !== "object") return null;
@@ -1641,6 +1668,35 @@ function UpdateManager() {
     if (nextStatus) setUpdateStatus(nextStatus);
   };
 
+  const normalizeReleaseStatus = (value: unknown): AppReleaseStatus | null => {
+    if (!value || typeof value !== "object") return null;
+    const status = value as Partial<AppReleaseStatus>;
+    if (typeof status.version !== "string" || !Array.isArray(status.checks)) return null;
+    return {
+      version: status.version,
+      tagName: typeof status.tagName === "string" ? status.tagName : `v${status.version}`,
+      repository: typeof status.repository === "string" ? status.repository : "",
+      branch: typeof status.branch === "string" ? status.branch : "未知",
+      commit: typeof status.commit === "string" ? status.commit : "未知",
+      releaseUrl: typeof status.releaseUrl === "string" ? status.releaseUrl : "",
+      canPublish: Boolean(status.canPublish),
+      message: typeof status.message === "string" ? status.message : "等待检查",
+      checks: status.checks
+        .filter((item): item is AppReleaseCheck => Boolean(item && typeof item === "object"))
+        .map((item) => ({
+          key: typeof item.key === "string" ? item.key : item.label,
+          label: typeof item.label === "string" ? item.label : "检查项",
+          ok: Boolean(item.ok),
+          detail: typeof item.detail === "string" ? item.detail : ""
+        }))
+    };
+  };
+
+  const applyReleaseStatus = (value: unknown) => {
+    const nextStatus = normalizeReleaseStatus(value);
+    if (nextStatus) setReleaseStatus(nextStatus);
+  };
+
   useEffect(() => {
     let cancelled = false;
     const unsubscribe = window.aistudy?.updates?.onStatus?.((status) => {
@@ -1648,6 +1704,9 @@ function UpdateManager() {
     });
     void window.aistudy?.updates?.status?.().then((status) => {
       if (!cancelled) applyUpdateStatus(status);
+    });
+    void window.aistudy?.updates?.releaseStatus?.().then((status) => {
+      if (!cancelled) applyReleaseStatus(status);
     });
     return () => {
       cancelled = true;
@@ -1672,9 +1731,42 @@ function UpdateManager() {
     }
   };
 
+  const refreshReleaseStatus = async () => {
+    setReleaseBusy(true);
+    setPublishResult(null);
+    try {
+      const statusResult = await window.aistudy?.updates?.releaseStatus?.();
+      applyReleaseStatus(statusResult);
+    } finally {
+      setReleaseBusy(false);
+    }
+  };
+
+  const publishRelease = async () => {
+    const version = releaseStatus?.version ?? latestEntry?.version;
+    if (!version) return;
+    setReleaseBusy(true);
+    try {
+      const result = await window.aistudy?.updates?.publishRelease?.(version);
+      if (result && typeof result === "object") {
+        const publish = result as AppReleasePublishResult;
+        setPublishResult({
+          ok: Boolean(publish.ok),
+          message: typeof publish.message === "string" ? publish.message : "发布完成",
+          releaseUrl: typeof publish.releaseUrl === "string" ? publish.releaseUrl : undefined,
+          status: normalizeReleaseStatus(publish.status) ?? undefined
+        });
+        if (publish.status) applyReleaseStatus(publish.status);
+      }
+    } finally {
+      setReleaseBusy(false);
+    }
+  };
+
   const status = updateStatus;
   const progress = Math.round(status?.downloadPercent ?? 0);
   const releaseDate = status?.releaseDate ? new Date(status.releaseDate).toLocaleDateString("zh-CN") : "";
+  const failedChecks = releaseStatus?.checks.filter((item) => !item.ok) ?? [];
 
   return (
     <section className="update-manager" aria-label="更新管理">
@@ -1732,36 +1824,106 @@ function UpdateManager() {
         </div>
       </article>
 
-      {sortedUpdates.map((entry, index) => {
-        const isOpen = openVersion === entry.version;
-        return (
-          <article className={isOpen ? "version-card open" : "version-card"} key={entry.version}>
-            <button
-              className="version-row"
-              aria-expanded={isOpen}
-              onClick={() => setOpenVersion(isOpen ? "" : entry.version)}
-            >
-              <div className="version-meta">
-                <span className="version-number">v{entry.version}</span>
-                <strong>{entry.title}</strong>
-                {index === 0 && <span className="latest-badge">最新</span>}
-              </div>
-              <div className="version-side">
-                <time>{entry.date}</time>
-                <ChevronDown size={18} />
-              </div>
-            </button>
+      <article className="release-console">
+        <div className="release-console-header">
+          <div>
+            <span className="update-source">本机发布</span>
+            <h2>发布草稿</h2>
+          </div>
+          <div className={releaseStatus?.canPublish ? "update-state available" : "update-state"}>
+            {releaseStatus?.message ?? "等待检查"}
+          </div>
+        </div>
 
-            {isOpen && (
-              <div className="version-detail">
-                <UpdateColumn title="功能更新" items={entry.featureUpdates} />
-                <UpdateColumn title="修复说明" items={entry.fixes} />
-                <UpdateColumn title="优化说明" items={entry.optimizations} />
-              </div>
-            )}
-          </article>
-        );
-      })}
+        <div className="release-summary-grid">
+          <div>
+            <span>目标版本</span>
+            <strong>{releaseStatus?.tagName ?? `v${latestEntry?.version ?? "未知"}`}</strong>
+          </div>
+          <div>
+            <span>分支</span>
+            <strong>{releaseStatus?.branch ?? "待检查"}</strong>
+          </div>
+          <div>
+            <span>提交</span>
+            <strong>{releaseStatus?.commit ?? "待检查"}</strong>
+          </div>
+          <div>
+            <span>阻塞项</span>
+            <strong>{failedChecks.length}</strong>
+          </div>
+        </div>
+
+        <div className="release-checks">
+          {(releaseStatus?.checks ?? []).map((item) => (
+            <div className={item.ok ? "release-check ok" : "release-check"} key={item.key}>
+              {item.ok ? <CheckCircle2 size={16} /> : <X size={16} />}
+              <span>{item.label}</span>
+              <strong>{item.detail}</strong>
+            </div>
+          ))}
+        </div>
+
+        <div className="release-rollback-strip">
+          <span>回滚方式：稳定 tag 升版发布</span>
+          <span>同版本覆盖：禁止</span>
+          <span>发布来源：当前干净提交</span>
+        </div>
+
+        {publishResult && (
+          <p className={publishResult.ok ? "release-result ok" : "release-result"}>
+            {publishResult.message}
+          </p>
+        )}
+
+        <div className="update-actions">
+          <button disabled={releaseBusy} onClick={() => void refreshReleaseStatus()}>
+            <RotateCcw size={16} />
+            刷新草稿
+          </button>
+          <button disabled={releaseBusy || !releaseStatus?.canPublish} onClick={() => void publishRelease()}>
+            <PackageCheck size={16} />
+            确认发布
+          </button>
+          <button onClick={() => void runUpdateAction("open")}>
+            <ExternalLink size={16} />
+            Release
+          </button>
+        </div>
+      </article>
+
+      {latestEntry && (
+        <article className="current-release-card">
+          <div className="version-row static">
+            <div className="version-meta">
+              <span className="version-number">v{latestEntry.version}</span>
+              <strong>{latestEntry.title}</strong>
+              <span className="latest-badge">当前记录</span>
+            </div>
+            <div className="version-side">
+              <time>{latestEntry.date}</time>
+            </div>
+          </div>
+          <div className="version-detail">
+            <UpdateColumn title="功能更新" items={latestEntry.featureUpdates} />
+            <UpdateColumn title="修复说明" items={latestEntry.fixes} />
+            <UpdateColumn title="优化说明" items={latestEntry.optimizations} />
+          </div>
+        </article>
+      )}
+
+      <details className="release-history">
+        <summary>历史记录</summary>
+        <div className="release-history-list">
+          {historyEntries.map((entry) => (
+            <div className="release-history-row" key={entry.version}>
+              <span>v{entry.version}</span>
+              <strong>{entry.title}</strong>
+              <time>{entry.date}</time>
+            </div>
+          ))}
+        </div>
+      </details>
     </section>
   );
 }

@@ -40,6 +40,8 @@ electron_1.contextBridge.exposeInMainWorld("aistudy", {
         download: () => electron_1.ipcRenderer.invoke("updates:download"),
         install: () => electron_1.ipcRenderer.invoke("updates:install"),
         openReleasePage: () => electron_1.ipcRenderer.invoke("updates:open-release-page"),
+        releaseStatus: () => electron_1.ipcRenderer.invoke("updates:release-status"),
+        publishRelease: (confirmVersion) => electron_1.ipcRenderer.invoke("updates:publish-release", confirmVersion),
         onStatus: (callback) => {
             const listener = (_event, status) => callback(status);
             electron_1.ipcRenderer.on("updates:status", listener);

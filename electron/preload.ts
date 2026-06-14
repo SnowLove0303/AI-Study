@@ -39,6 +39,8 @@ contextBridge.exposeInMainWorld("aistudy", {
     download: () => ipcRenderer.invoke("updates:download"),
     install: () => ipcRenderer.invoke("updates:install"),
     openReleasePage: () => ipcRenderer.invoke("updates:open-release-page"),
+    releaseStatus: () => ipcRenderer.invoke("updates:release-status"),
+    publishRelease: (confirmVersion: unknown) => ipcRenderer.invoke("updates:publish-release", confirmVersion),
     onStatus: (callback: (status: unknown) => void) => {
       const listener = (_event: unknown, status: unknown) => callback(status);
       ipcRenderer.on("updates:status", listener);

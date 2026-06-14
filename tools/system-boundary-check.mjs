@@ -56,6 +56,10 @@ if (presentForbiddenScripts.length > 0) {
   fail(`Forbidden package scripts are still present: ${presentForbiddenScripts.join(", ")}`);
 }
 
+if (packageJson.scripts?.["release:verify-tag"] !== "node tools/release-tag-check.mjs") {
+  fail("Release tag verification script is missing.");
+}
+
 const latestVersionMatch = updateLogText.match(/version:\s*"([^"]+)"/);
 if (!latestVersionMatch) {
   fail("Cannot read latest version from src/updateLog.ts");
@@ -67,6 +71,14 @@ if (!latestVersionMatch) {
 
 for (const requiredDoc of ["README.md", "PROJECT_INDEX.md", "docs/system-feature-relations.md"]) {
   if (!exists(requiredDoc)) fail(`Missing required system document: ${requiredDoc}`);
+}
+
+if (!exists("tools/release-tag-check.mjs")) {
+  fail("Missing release tag check tool: tools/release-tag-check.mjs");
+}
+
+if (!read(".github/workflows/release.yml").includes("npm run release:verify-tag")) {
+  fail("Release workflow does not verify tag/version alignment.");
 }
 
 const requiredIpcPairs = [
@@ -85,6 +97,8 @@ const requiredIpcPairs = [
   ["updates.check", "updates:check"],
   ["updates.download", "updates:download"],
   ["updates.install", "updates:install"],
+  ["updates.releaseStatus", "updates:release-status"],
+  ["updates.publishRelease", "updates:publish-release"],
   ["mcp.notionImportStatus", "mcp:notion-import-status"]
 ];
 

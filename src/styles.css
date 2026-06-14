@@ -3406,6 +3406,129 @@ h1 {
   opacity: 0.45;
 }
 
+.release-console,
+.current-release-card,
+.release-history {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.release-console {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.release-console-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.release-console-header h2 {
+  font-size: 22px;
+}
+
+.release-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.release-summary-grid div {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(248, 250, 252, 0.82);
+}
+
+.release-summary-grid span,
+.release-summary-grid strong {
+  display: block;
+}
+
+.release-summary-grid span {
+  margin-bottom: 5px;
+  color: var(--ink-500);
+  font-size: 13px;
+}
+
+.release-summary-grid strong {
+  overflow: hidden;
+  color: var(--ink-950);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.release-checks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.release-check {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 18px 96px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(220, 38, 38, 0.2);
+  border-radius: 8px;
+  color: #991b1b;
+  background: #fef2f2;
+}
+
+.release-check.ok {
+  border-color: rgba(13, 148, 136, 0.2);
+  color: var(--teal);
+  background: rgba(204, 251, 241, 0.42);
+}
+
+.release-check span {
+  color: var(--ink-700);
+  font-weight: 800;
+}
+
+.release-check strong {
+  overflow: hidden;
+  color: var(--ink-800);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.release-rollback-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.release-rollback-strip span {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: 999px;
+  color: var(--ink-700);
+  background: rgba(100, 116, 139, 0.1);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.release-result {
+  color: #991b1b;
+  font-weight: 800;
+}
+
+.release-result.ok {
+  color: var(--teal);
+}
+
 .version-card {
   overflow: hidden;
   border: 1px solid var(--line);
@@ -3433,6 +3556,14 @@ h1 {
 
 .version-row:hover {
   background: rgba(15, 118, 110, 0.05);
+}
+
+.version-row.static {
+  cursor: default;
+}
+
+.version-row.static:hover {
+  background: transparent;
 }
 
 .version-card.open .version-row {
@@ -3535,6 +3666,52 @@ h1 {
   height: 5px;
   border-radius: 999px;
   background: var(--teal);
+}
+
+.release-history summary {
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  padding: 0 18px;
+  color: var(--ink-800);
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.release-history-list {
+  display: grid;
+  border-top: 1px solid var(--line);
+}
+
+.release-history-row {
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) 112px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.release-history-row:last-child {
+  border-bottom: 0;
+}
+
+.release-history-row span {
+  color: var(--teal);
+  font-weight: 900;
+}
+
+.release-history-row strong {
+  overflow: hidden;
+  color: var(--ink-900);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.release-history-row time {
+  color: var(--ink-500);
+  text-align: right;
 }
 
 .stat-row {
@@ -4325,6 +4502,8 @@ input:focus-visible {
   .port-card-grid,
   .mcp-console-grid,
   .mcp-grid,
+  .release-checks,
+  .release-summary-grid,
   .version-detail {
     grid-template-columns: 1fr;
   }
@@ -4363,6 +4542,7 @@ input:focus-visible {
   .course-hero,
   .content-grid,
   .mcp-hero,
+  .update-check-grid,
   .metrics {
     grid-template-columns: 1fr;
   }

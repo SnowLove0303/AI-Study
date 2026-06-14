@@ -9,6 +9,14 @@ export type UpdateLogEntry = {
 
 export const updateLog: UpdateLogEntry[] = [
   {
+    version: "1.2.164",
+    date: "2026-06-14",
+    title: "更新发布流程标准化",
+    featureUpdates: ["更新管理新增发布草稿检查和确认发布入口"],
+    fixes: ["修正更新管理把每个修补点都展开成独立版本卡片的问题"],
+    optimizations: ["发布前会校验 Git、版本记录、安装包、blockmap、latest.yml 和远端 Release 状态，降低无法回滚风险"]
+  },
+  {
     version: "1.2.163",
     date: "2026-06-14",
     title: "更新源不可访问提示",

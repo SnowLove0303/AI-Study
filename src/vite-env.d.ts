@@ -40,6 +40,8 @@ interface Window {
       download: () => Promise<unknown>;
       install: () => Promise<unknown>;
       openReleasePage: () => Promise<unknown>;
+      releaseStatus: () => Promise<unknown>;
+      publishRelease: (confirmVersion: unknown) => Promise<unknown>;
       onStatus: (callback: (status: unknown) => void) => () => void;
     };
   };

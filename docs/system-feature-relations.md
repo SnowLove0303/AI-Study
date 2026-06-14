@@ -163,7 +163,7 @@ flowchart LR
 
 ## 自动更新关系
 
-更新管理分为两层：本地版本记录来自 `src/updateLog.ts`，远端安装更新来自 GitHub Releases。
+更新管理分为三层：当前发布记录来自 `src/updateLog.ts` 的最新项，远端安装更新来自 GitHub Releases，本机发布草稿来自 Git 与打包产物检查。
 
 ```mermaid
 flowchart LR
@@ -172,6 +172,8 @@ flowchart LR
   Release["GitHub Releases"]
   Latest["latest.yml"]
   App["AIstudy 更新管理"]
+  Draft["发布草稿检查"]
+  Git["Git 干净提交"]
   Updater["electron-updater"]
   Installer["NSIS 安装包"]
 
@@ -180,6 +182,9 @@ flowchart LR
   Release --> Latest
   Release --> Installer
   App --> Updater
+  App --> Draft
+  Draft --> Git
+  Draft --> Release
   Updater --> Latest
   Updater --> Installer
 ```
@@ -191,6 +196,8 @@ flowchart LR
 - B 设备只能安装 GitHub Releases 中已发布的版本，不能直接根据 git commit 自动更新。
 - GitHub 更新源必须能被 B 设备匿名访问；源码仓库保持私有时，应把安装包发布到公开的 Release 仓库。
 - 更新管理页面只触发检查、下载和重启安装；安装包下载、校验和替换由 `electron-updater` 处理。
+- 更新管理页面的发布草稿只允许从干净的 `main` 提交发布新 tag；同版本 tag 或 Release 已存在时必须阻断。
+- 回滚不覆盖旧版本。线上版本出问题时，从稳定 tag 恢复代码，提升版本号，再发布新的修复 Release。
 
 ## AI 问答关系
 

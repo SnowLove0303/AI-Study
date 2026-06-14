@@ -29,6 +29,7 @@ const updateGithubRepo = "AIstudy";
 const updateReleasePageUrl = "https://github.com/SnowLove0303/AIstudy/releases";
 const updateSourceLabel = "GitHub Releases";
 const updateFeedUrl = `https://github.com/${updateGithubOwner}/${updateGithubRepo}/releases.atom`;
+const repositoryRoot = "F:\\AIAPP\\Xiangmu\\AIstudy";
 let mysqlPool = null;
 let mysqlUnavailableLogged = false;
 let mysqlStartAttempted = false;
@@ -2504,8 +2505,7 @@ async function getSystemContextInfo() {
     const latestNotionImportBackup = await getLatestNotionImportBackup();
     const appPath = electron_1.app.getAppPath();
     const packageOutput = node_path_1.default.dirname(electron_1.app.getPath("exe"));
-    const repository = "F:\\AIAPP\\Xiangmu\\AIstudy";
-    const readmePath = node_path_1.default.join(repository, "README.md");
+    const readmePath = node_path_1.default.join(repositoryRoot, "README.md");
     return {
         app: {
             name: electron_1.app.getName(),
@@ -2516,7 +2516,7 @@ async function getSystemContextInfo() {
             node: process.versions.node
         },
         paths: {
-            repository,
+            repository: repositoryRoot,
             appPath,
             executable: electron_1.app.getPath("exe"),
             userData: electron_1.app.getPath("userData"),
@@ -2555,8 +2555,8 @@ async function getSystemContextInfo() {
         },
         docs: {
             readme: readmePath,
-            projectIndex: node_path_1.default.join(repository, "PROJECT_INDEX.md"),
-            updateLog: node_path_1.default.join(repository, "src", "updateLog.ts"),
+            projectIndex: node_path_1.default.join(repositoryRoot, "PROJECT_INDEX.md"),
+            updateLog: node_path_1.default.join(repositoryRoot, "src", "updateLog.ts"),
             readmeContent: await readOptionalUtf8File(readmePath)
         }
     };
@@ -2800,6 +2800,179 @@ function installDownloadedAppUpdate() {
     setImmediate(() => electron_updater_1.autoUpdater.quitAndInstall(false, true));
     return appUpdateStatus;
 }
+function createReleaseCheck(key, label, ok, detail) {
+    return { key, label, ok, detail };
+}
+async function runRepositoryCommand(command, args, timeoutMs = 20000) {
+    return new Promise((resolve) => {
+        const child = (0, node_child_process_1.spawn)(command, args, {
+            cwd: repositoryRoot,
+            windowsHide: true
+        });
+        let stdout = "";
+        let stderr = "";
+        let settled = false;
+        const finish = (code, timedOut = false) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(timer);
+            resolve({
+                ok: code === 0 && !timedOut,
+                code,
+                stdout: stdout.trim(),
+                stderr: timedOut ? `${stderr.trim()}\n命令超时`.trim() : stderr.trim()
+            });
+        };
+        const timer = setTimeout(() => {
+            child.kill();
+            finish(null, true);
+        }, timeoutMs);
+        child.stdout?.on("data", (chunk) => {
+            stdout += chunk.toString();
+        });
+        child.stderr?.on("data", (chunk) => {
+            stderr += chunk.toString();
+        });
+        child.on("error", (error) => {
+            stderr += error.message;
+            finish(null);
+        });
+        child.on("close", (code) => finish(code));
+    });
+}
+async function getAppReleaseStatus() {
+    const version = electron_1.app.getVersion();
+    const tagName = `v${version}`;
+    const releaseUrl = `${updateReleasePageUrl}/tag/${tagName}`;
+    const packageJsonPath = node_path_1.default.join(repositoryRoot, "package.json");
+    const updateLogPath = node_path_1.default.join(repositoryRoot, "src", "updateLog.ts");
+    const latestYamlPath = node_path_1.default.join(repositoryRoot, "release", "latest.yml");
+    const installerPath = node_path_1.default.join(repositoryRoot, "release", `AIstudy-Setup-${version}.exe`);
+    const blockmapPath = `${installerPath}.blockmap`;
+    const checks = [];
+    let packageVersion = "";
+    let updateLogVersion = "";
+    let latestYaml = "";
+    try {
+        packageVersion = JSON.parse(await promises_1.default.readFile(packageJsonPath, "utf8")).version;
+    }
+    catch {
+        packageVersion = "";
+    }
+    try {
+        const updateLogText = await promises_1.default.readFile(updateLogPath, "utf8");
+        updateLogVersion = updateLogText.match(/version:\s*"([^"]+)"/)?.[1] ?? "";
+    }
+    catch {
+        updateLogVersion = "";
+    }
+    try {
+        latestYaml = await promises_1.default.readFile(latestYamlPath, "utf8");
+    }
+    catch {
+        latestYaml = "";
+    }
+    checks.push(createReleaseCheck("version", "版本同步", packageVersion === version && updateLogVersion === version, packageVersion && updateLogVersion
+        ? `package.json ${packageVersion}，更新记录 ${updateLogVersion}`
+        : "未读取到 package.json 或更新记录版本"));
+    checks.push(createReleaseCheck("installer", "安装包", await fileExists(installerPath), node_path_1.default.relative(repositoryRoot, installerPath)));
+    checks.push(createReleaseCheck("blockmap", "增量索引", await fileExists(blockmapPath), node_path_1.default.relative(repositoryRoot, blockmapPath)));
+    checks.push(createReleaseCheck("latest-yml", "更新清单", latestYaml.includes(`version: ${version}`) && latestYaml.includes(`AIstudy-Setup-${version}.exe`), "release/latest.yml"));
+    await runRepositoryCommand("git", ["fetch", "origin", "main", "--quiet"], 30000);
+    const branchResult = await runRepositoryCommand("git", ["rev-parse", "--abbrev-ref", "HEAD"], 8000);
+    const commitResult = await runRepositoryCommand("git", ["rev-parse", "HEAD"], 8000);
+    const statusResult = await runRepositoryCommand("git", ["status", "--porcelain"], 8000);
+    const remoteContainsResult = await runRepositoryCommand("git", ["branch", "-r", "--contains", "HEAD"], 15000);
+    const remoteTagResult = await runRepositoryCommand("git", ["ls-remote", "--tags", "origin", tagName], 15000);
+    const ghAuthResult = await runRepositoryCommand("gh", ["auth", "status"], 15000);
+    const releaseViewResult = await runRepositoryCommand("gh", ["release", "view", tagName, "--repo", `${updateGithubOwner}/${updateGithubRepo}`], 15000);
+    const branch = branchResult.stdout || "未知";
+    const commit = commitResult.stdout || "未知";
+    const clean = statusResult.ok && statusResult.stdout.length === 0;
+    const remoteSynced = remoteContainsResult.ok && remoteContainsResult.stdout.includes("origin/main");
+    const tagExists = remoteTagResult.ok && remoteTagResult.stdout.length > 0;
+    const releaseExists = releaseViewResult.ok;
+    checks.push(createReleaseCheck("git", "Git 可用", branchResult.ok && commitResult.ok, commit));
+    checks.push(createReleaseCheck("branch", "发布分支", branch === "main", branch));
+    checks.push(createReleaseCheck("clean", "工作区", clean, clean ? "干净" : "存在未提交改动"));
+    checks.push(createReleaseCheck("remote-sync", "远端同步", remoteSynced, remoteSynced ? "origin/main 包含当前提交" : "需要先推送 main"));
+    checks.push(createReleaseCheck("remote-tag", "远端标签", !tagExists, tagExists ? `${tagName} 已存在` : `${tagName} 未占用`));
+    checks.push(createReleaseCheck("gh", "GitHub 登录", ghAuthResult.ok, ghAuthResult.ok ? "已登录" : ghAuthResult.stderr || "gh 不可用"));
+    checks.push(createReleaseCheck("release", "远端 Release", !releaseExists, releaseExists ? `${tagName} 已发布` : `${tagName} 未发布`));
+    const canPublish = checks.every((check) => check.ok);
+    return {
+        version,
+        tagName,
+        repository: repositoryRoot,
+        branch,
+        commit,
+        releaseUrl,
+        canPublish,
+        message: canPublish ? "发布草稿已就绪" : "发布前检查未通过",
+        checks
+    };
+}
+function buildReleaseNotesFromUpdateLog() {
+    return `## 更新内容
+- 更新管理调整为当前发布记录，不再把每个修补点铺成独立版本卡片。
+- 新增发布草稿检查和确认发布入口。
+- 发布前校验 Git 工作区、版本记录、安装包、blockmap、latest.yml、远端 tag 和 Release 状态。
+
+## 回滚约束
+- 不覆盖同版本 Release。
+- 线上问题通过恢复到稳定 tag 后提升版本重新发布来回滚。`;
+}
+async function publishAppRelease(confirmVersion) {
+    const status = await getAppReleaseStatus();
+    if (confirmVersion !== status.version) {
+        return {
+            ok: false,
+            message: `确认版本不匹配，需要 ${status.version}`,
+            status
+        };
+    }
+    if (!status.canPublish) {
+        return {
+            ok: false,
+            message: "发布前检查未通过",
+            status
+        };
+    }
+    const installerPath = node_path_1.default.join(repositoryRoot, "release", `AIstudy-Setup-${status.version}.exe`);
+    const blockmapPath = `${installerPath}.blockmap`;
+    const latestYamlPath = node_path_1.default.join(repositoryRoot, "release", "latest.yml");
+    const createResult = await runRepositoryCommand("gh", [
+        "release",
+        "create",
+        status.tagName,
+        installerPath,
+        blockmapPath,
+        latestYamlPath,
+        "--repo",
+        `${updateGithubOwner}/${updateGithubRepo}`,
+        "--target",
+        status.commit,
+        "--title",
+        `AIstudy ${status.version}`,
+        "--notes",
+        buildReleaseNotesFromUpdateLog()
+    ], 300000);
+    if (!createResult.ok) {
+        return {
+            ok: false,
+            message: createResult.stderr || createResult.stdout || "发布失败",
+            status: await getAppReleaseStatus()
+        };
+    }
+    await runRepositoryCommand("git", ["fetch", "--tags", "origin"], 30000);
+    return {
+        ok: true,
+        message: "发布完成",
+        releaseUrl: createResult.stdout || status.releaseUrl,
+        status: await getAppReleaseStatus()
+    };
+}
 function registerDataHandlers() {
     electron_1.ipcMain.handle("courses:load", async () => loadCourseDatabase());
     electron_1.ipcMain.handle("courses:save", async (_event, courses) => saveCourseDatabase(courses));
@@ -2820,6 +2993,8 @@ function registerDataHandlers() {
     electron_1.ipcMain.handle("updates:download", async () => downloadAppUpdate());
     electron_1.ipcMain.handle("updates:install", async () => installDownloadedAppUpdate());
     electron_1.ipcMain.handle("updates:open-release-page", async () => electron_1.shell.openExternal(updateReleasePageUrl));
+    electron_1.ipcMain.handle("updates:release-status", async () => getAppReleaseStatus());
+    electron_1.ipcMain.handle("updates:publish-release", async (_event, confirmVersion) => publishAppRelease(confirmVersion));
     electron_1.ipcMain.handle("mcp:notion-import-status", async () => {
         const contractPath = getPackagedResourcePath("mcp", "aistudy-notion-knowledge-import.contract.json");
         const guidePath = getPackagedResourcePath("docs", "mcp-notion-knowledge-import.md");
