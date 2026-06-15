@@ -87,12 +87,29 @@ type KnowledgeDocument = {
   snapshot: KnowledgeDocumentSnapshot | null;
   updatedAt: string | null;
   byteSize: number;
+  hasContent: boolean;
+};
+
+type KnowledgeDocumentStatus = {
+  courseId: string;
+  mindMapId: string;
+  nodeId: string;
+  documentId: string;
+  title: string;
+  updatedAt: string | null;
+  byteSize: number;
+  hasContent: boolean;
 };
 
 type KnowledgeDocumentNodeRequest = {
   courseId: string;
   mindMapId: string;
   nodeId: string;
+};
+
+type KnowledgeDocumentStatusRequest = {
+  courseId: string;
+  mindMapId: string;
 };
 
 type KnowledgeDocumentSaveRequest = KnowledgeDocumentNodeRequest & {
@@ -164,12 +181,29 @@ type KnowledgeDocumentRow = RowDataPacket & {
   title: string;
   currentSnapshotId: string | null;
   currentByteSize: number | string;
+  hasContent: number | string | boolean;
+  updatedAt: Date | string;
+};
+
+type KnowledgeDocumentStatusRow = RowDataPacket & {
+  id: string;
+  courseId: string;
+  mindMapId: string;
+  nodeId: string;
+  title: string;
+  currentByteSize: number | string;
+  hasContent: number | string | boolean;
   updatedAt: Date | string;
 };
 
 type KnowledgeDocumentSnapshotRow = RowDataPacket & {
   payloadJson: string;
   byteSize: number | string;
+};
+
+type KnowledgeDocumentContentBackfillRow = RowDataPacket & {
+  documentId: string;
+  payloadJson: string | null;
 };
 
 type KnowledgeDocumentSequenceRow = RowDataPacket & {
@@ -1336,18 +1370,42 @@ async function ensureMindMapTables(pool: Pool, mindMapTable: string, snapshotTab
   await migrateMindMapTables(pool, mindMapTable, snapshotTable, nodeTable);
 }
 
+async function backfillKnowledgeDocumentHasContent(pool: Pool, documentTable: string, snapshotTable: string) {
+  const [rows] = await pool.execute<KnowledgeDocumentContentBackfillRow[]>(
+    `SELECT d.id AS documentId, s.payload_json AS payloadJson
+     FROM ${documentTable} d
+     LEFT JOIN ${snapshotTable} s ON s.id = d.current_snapshot_id AND s.document_id = d.id
+     WHERE d.deleted_at IS NULL`
+  );
+
+  for (const row of rows) {
+    let hasContent = false;
+    if (row.payloadJson) {
+      try {
+        hasContent = knowledgeDocumentSnapshotHasContent(normalizeKnowledgeDocumentSnapshot(JSON.parse(row.payloadJson)));
+      } catch {
+        hasContent = false;
+      }
+    }
+    await pool.execute(`UPDATE ${documentTable} SET has_content = ? WHERE id = ?`, [hasContent ? 1 : 0, row.documentId]);
+  }
+}
+
 async function migrateKnowledgeDocumentTables(pool: Pool, documentTable: string, snapshotTable: string) {
   const documentTableName = rawMysqlIdentifier(documentTable);
   const snapshotTableName = rawMysqlIdentifier(snapshotTable);
+  const hadHasContentColumn = await hasMysqlColumn(pool, documentTableName, "has_content");
 
   await addMysqlColumnIfMissing(pool, documentTable, documentTableName, "mind_map_id", "`mind_map_id` VARCHAR(64) NULL AFTER `course_id`");
   await addMysqlColumnIfMissing(pool, documentTable, documentTableName, "current_byte_size", "`current_byte_size` INT NOT NULL DEFAULT 0 AFTER `current_snapshot_id`");
+  await addMysqlColumnIfMissing(pool, documentTable, documentTableName, "has_content", "`has_content` TINYINT(1) NOT NULL DEFAULT 0 AFTER `current_byte_size`");
   await pool.query(`UPDATE ${documentTable} SET mind_map_id = 'legacy' WHERE mind_map_id IS NULL OR mind_map_id = ''`);
   await pool.query(`ALTER TABLE ${documentTable} MODIFY COLUMN id VARCHAR(64) NOT NULL`);
   await pool.query(`ALTER TABLE ${documentTable} MODIFY COLUMN course_id VARCHAR(64) NOT NULL`);
   await pool.query(`ALTER TABLE ${documentTable} MODIFY COLUMN mind_map_id VARCHAR(64) NOT NULL`);
   await pool.query(`ALTER TABLE ${documentTable} MODIFY COLUMN node_id VARCHAR(96) NOT NULL`);
   await pool.query(`ALTER TABLE ${documentTable} MODIFY COLUMN current_snapshot_id VARCHAR(64) NULL`);
+  await pool.query(`ALTER TABLE ${documentTable} MODIFY COLUMN has_content TINYINT(1) NOT NULL DEFAULT 0`);
   await addMysqlIndexIfMissing(
     pool,
     documentTable,
@@ -1376,7 +1434,17 @@ async function migrateKnowledgeDocumentTables(pool: Pool, documentTable: string,
     "idx_doc_current_snapshot",
     "KEY idx_doc_current_snapshot (current_snapshot_id)"
   );
+  await addMysqlIndexIfMissing(
+    pool,
+    documentTable,
+    documentTableName,
+    "idx_doc_content_lookup",
+    "KEY idx_doc_content_lookup (course_id, mind_map_id, has_content, deleted_at)"
+  );
   await addMysqlIndexIfMissing(pool, documentTable, documentTableName, "idx_doc_deleted_at", "KEY idx_doc_deleted_at (deleted_at)");
+  if (!hadHasContentColumn) {
+    await backfillKnowledgeDocumentHasContent(pool, documentTable, snapshotTable);
+  }
 
   await pool.query(`ALTER TABLE ${snapshotTable} MODIFY COLUMN id VARCHAR(64) NOT NULL`);
   await pool.query(`ALTER TABLE ${snapshotTable} MODIFY COLUMN document_id VARCHAR(64) NOT NULL`);
@@ -1414,6 +1482,7 @@ async function ensureKnowledgeDocumentTables(pool: Pool, documentTable: string, 
       title VARCHAR(255) NOT NULL,
       current_snapshot_id VARCHAR(64) NULL,
       current_byte_size INT NOT NULL DEFAULT 0,
+      has_content TINYINT(1) NOT NULL DEFAULT 0,
       created_at DATETIME(3) NOT NULL,
       updated_at DATETIME(3) NOT NULL,
       deleted_at DATETIME(3) NULL,
@@ -1422,6 +1491,7 @@ async function ensureKnowledgeDocumentTables(pool: Pool, documentTable: string, 
       KEY idx_doc_node_lookup (mind_map_id, node_id, deleted_at),
       KEY idx_doc_course_updated (course_id, updated_at),
       KEY idx_doc_current_snapshot (current_snapshot_id),
+      KEY idx_doc_content_lookup (course_id, mind_map_id, has_content, deleted_at),
       KEY idx_doc_deleted_at (deleted_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
@@ -2253,6 +2323,42 @@ function normalizeKnowledgeDocumentSnapshot(value: unknown): KnowledgeDocumentSn
   };
 }
 
+const DOCUMENT_CONTENT_STRUCTURAL_KEYS = new Set([
+  "id",
+  "type",
+  "mode",
+  "name",
+  "style",
+  "styles",
+  "attrs",
+  "schemaVersion",
+  "editor",
+  "editorVersion",
+  "updatedAt"
+]);
+
+function hasKnowledgeDocumentText(value: unknown): boolean {
+  if (typeof value === "string") {
+    return value.trim().length > 0;
+  }
+  if (Array.isArray(value)) {
+    return value.some(hasKnowledgeDocumentText);
+  }
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return Object.entries(value).some(([key, child]) => {
+    if (DOCUMENT_CONTENT_STRUCTURAL_KEYS.has(key)) return false;
+    return hasKnowledgeDocumentText(child);
+  });
+}
+
+function knowledgeDocumentSnapshotHasContent(snapshot: KnowledgeDocumentSnapshot | null | undefined) {
+  if (!snapshot?.content) return false;
+  return hasKnowledgeDocumentText(snapshot.content);
+}
+
 function normalizeKnowledgeDocumentNodeRequest(value: unknown): KnowledgeDocumentNodeRequest {
   if (!isRecord(value)) {
     throw new Error("Knowledge document request must be an object.");
@@ -2262,6 +2368,17 @@ function normalizeKnowledgeDocumentNodeRequest(value: unknown): KnowledgeDocumen
     courseId: normalizeId(value.courseId, "Course id"),
     mindMapId: normalizeId(value.mindMapId, "Mind map id"),
     nodeId: normalizeNodeScopedId(value.nodeId, "Mind map node id")
+  };
+}
+
+function normalizeKnowledgeDocumentStatusRequest(value: unknown): KnowledgeDocumentStatusRequest {
+  if (!isRecord(value)) {
+    throw new Error("Knowledge document status request must be an object.");
+  }
+
+  return {
+    courseId: normalizeId(value.courseId, "Course id"),
+    mindMapId: normalizeId(value.mindMapId, "Mind map id")
   };
 }
 
@@ -2287,13 +2404,36 @@ async function findKnowledgeDocumentByNode(
   const [rows] = await connection.execute<KnowledgeDocumentRow[]>(
     `SELECT id, course_id AS courseId, mind_map_id AS mindMapId, node_id AS nodeId, title,
             current_snapshot_id AS currentSnapshotId, current_byte_size AS currentByteSize,
-            updated_at AS updatedAt
+            has_content AS hasContent, updated_at AS updatedAt
      FROM ${documentTable}
      WHERE course_id = ? AND mind_map_id = ? AND node_id = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}
      LIMIT 1${forUpdate ? " FOR UPDATE" : ""}`,
     [request.courseId, request.mindMapId, request.nodeId]
   );
   return rows[0] ?? null;
+}
+
+async function listKnowledgeDocumentStatuses(input: unknown): Promise<KnowledgeDocumentStatus[]> {
+  const request = normalizeKnowledgeDocumentStatusRequest(input);
+  const { pool, knowledgeDocumentTable } = await getMysqlRuntime();
+  const [rows] = await pool.execute<KnowledgeDocumentStatusRow[]>(
+    `SELECT id, course_id AS courseId, mind_map_id AS mindMapId, node_id AS nodeId, title,
+            current_byte_size AS currentByteSize, has_content AS hasContent, updated_at AS updatedAt
+     FROM ${knowledgeDocumentTable}
+     WHERE course_id = ? AND mind_map_id = ? AND deleted_at IS NULL`,
+    [request.courseId, request.mindMapId]
+  );
+
+  return rows.map((row) => ({
+    courseId: row.courseId,
+    mindMapId: row.mindMapId,
+    nodeId: row.nodeId,
+    documentId: row.id,
+    title: row.title,
+    updatedAt: toIsoTimestamp(row.updatedAt),
+    byteSize: Number(row.currentByteSize) || 0,
+    hasContent: Boolean(Number(row.hasContent))
+  }));
 }
 
 async function assertMindMapNodeExists(
@@ -2353,7 +2493,8 @@ async function readKnowledgeDocument(input: unknown): Promise<KnowledgeDocument 
     title: document.title,
     snapshot,
     updatedAt: toIsoTimestamp(document.updatedAt),
-    byteSize: Number(document.currentByteSize) || 0
+    byteSize: Number(document.currentByteSize) || 0,
+    hasContent: Boolean(Number(document.hasContent))
   };
 }
 
@@ -2374,6 +2515,7 @@ async function writeKnowledgeDocument(input: unknown): Promise<KnowledgeDocument
     const payloadJson = createSnapshotPayloadJson(request.snapshot, updatedAt);
     const payloadHash = createSnapshotContentHash(request.snapshot);
     const byteSize = Buffer.byteLength(payloadJson, "utf8");
+    const hasContent = knowledgeDocumentSnapshotHasContent(request.snapshot);
 
     const currentSnapshotMeta = existing?.currentSnapshotId
       ? await readSnapshotMeta(connection, knowledgeDocumentSnapshotTable, existing.currentSnapshotId, "document_id", documentId)
@@ -2383,12 +2525,13 @@ async function writeKnowledgeDocument(input: unknown): Promise<KnowledgeDocument
 
     await connection.execute(
       `INSERT INTO ${knowledgeDocumentTable}
-        (id, course_id, mind_map_id, node_id, title, current_snapshot_id, current_byte_size, created_at, updated_at, deleted_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+        (id, course_id, mind_map_id, node_id, title, current_snapshot_id, current_byte_size, has_content, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
        ON DUPLICATE KEY UPDATE
         title = VALUES(title),
         current_snapshot_id = VALUES(current_snapshot_id),
         current_byte_size = VALUES(current_byte_size),
+        has_content = VALUES(has_content),
         updated_at = VALUES(updated_at),
         deleted_at = NULL`,
       [
@@ -2399,6 +2542,7 @@ async function writeKnowledgeDocument(input: unknown): Promise<KnowledgeDocument
         title,
         snapshotId,
         byteSize,
+        hasContent ? 1 : 0,
         now,
         now
       ]
@@ -2442,7 +2586,8 @@ async function writeKnowledgeDocument(input: unknown): Promise<KnowledgeDocument
       title,
       snapshot: JSON.parse(payloadJson) as KnowledgeDocumentSnapshot,
       updatedAt,
-      byteSize
+      byteSize,
+      hasContent
     };
   } catch (error) {
     await connection.rollback();
@@ -2562,6 +2707,8 @@ ipcMain.handle("mindmaps:load", (_event, courseId: unknown) => readMindMapDocume
 ipcMain.handle("mindmaps:save", (_event, request: unknown) => writeMindMapDocument(request));
 
 ipcMain.handle("knowledge-documents:load", (_event, request: unknown) => readKnowledgeDocument(request));
+
+ipcMain.handle("knowledge-documents:list-statuses", (_event, request: unknown) => listKnowledgeDocumentStatuses(request));
 
 ipcMain.handle("knowledge-documents:save", (_event, request: unknown) => writeKnowledgeDocument(request));
 

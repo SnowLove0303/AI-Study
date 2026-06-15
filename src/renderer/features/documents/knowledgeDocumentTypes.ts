@@ -24,6 +24,18 @@ export type KnowledgeDocumentRecord = {
   snapshot: KnowledgeDocumentSnapshot;
   updatedAt: string | null;
   byteSize: number;
+  hasContent: boolean;
+};
+
+export type KnowledgeDocumentStatus = {
+  courseId: string;
+  mindMapId: string;
+  nodeId: string;
+  documentId: string;
+  title: string;
+  updatedAt: string | null;
+  byteSize: number;
+  hasContent: boolean;
 };
 
 export type KnowledgeDocumentSaveInput = {

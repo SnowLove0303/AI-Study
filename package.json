@@ -6,7 +6,7 @@
   "private": true,
   "repository": {
     "type": "git",
-    "url": "https://github.com/SnowLove0303/AIstudy.git"
+    "url": "https://github.com/SnowLove0303/AI-Study.git"
   },
   "main": "dist-electron/main.js",
   "type": "module",

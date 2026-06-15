@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld("aistudyMindMaps", {
 
 contextBridge.exposeInMainWorld("aistudyKnowledgeDocuments", {
   load: (request: unknown) => ipcRenderer.invoke("knowledge-documents:load", request),
+  listStatuses: (request: unknown) => ipcRenderer.invoke("knowledge-documents:list-statuses", request),
   save: (request: unknown) => ipcRenderer.invoke("knowledge-documents:save", request)
 });
 

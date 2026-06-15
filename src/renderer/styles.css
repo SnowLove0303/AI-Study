@@ -1065,6 +1065,36 @@ h3 {
   color: var(--accent);
 }
 
+.document-page-navigation {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.document-local-toolbar .document-page-navigation button {
+  min-width: 64px;
+  border-color: rgba(123, 145, 169, 0.18);
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.document-local-toolbar .document-page-navigation button:hover:not(:disabled) {
+  border-color: rgba(31, 111, 209, 0.32);
+  background: rgba(239, 246, 255, 0.82);
+  color: var(--accent);
+}
+
+.document-local-toolbar .document-page-navigation .document-skip-blank-button {
+  min-width: 78px;
+}
+
+.document-local-toolbar .document-page-navigation .document-skip-blank-button.active {
+  border-color: var(--line-accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 .document-size-control {
   display: inline-flex;
   align-items: center;

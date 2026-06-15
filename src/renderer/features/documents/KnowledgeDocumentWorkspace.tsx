@@ -1,5 +1,5 @@
 import React from "react";
-import { Bold, Bot, Italic, Redo2, Save, Type, Underline, Undo2 } from "lucide-react";
+import { Bold, Bot, ChevronLeft, ChevronRight, Italic, Redo2, Save, SkipForward, Type, Underline, Undo2 } from "lucide-react";
 import { createCanvasDocumentEditor, createEmptyKnowledgeDocumentSnapshot } from "./canvasEditorAdapter";
 import { AiAssistantPanel } from "../assistant/AiAssistantPanel";
 import { createKnowledgeDocumentBinding } from "../../domain/coreContracts";
@@ -16,14 +16,17 @@ import type {
   KnowledgeDocumentFormatState,
   KnowledgeDocumentRecord,
   KnowledgeDocumentSaveInput,
+  KnowledgeDocumentStatus,
   KnowledgeDocumentSnapshot
 } from "./knowledgeDocumentTypes";
-import type { MindMapSelectedNode } from "../mindmap/mindMapTypes";
+import type { MindMapOutlineItem, MindMapSelectedNode } from "../mindmap/mindMapTypes";
 
 type KnowledgeDocumentWorkspaceProps = {
   courseId: string | null;
   mindMapId: string | null;
   selectedNode: MindMapSelectedNode;
+  outline: MindMapOutlineItem[];
+  onNodeSelect?: (nodeId: string) => void;
 };
 
 type StorageMode = "mysql" | "local" | "none";
@@ -33,6 +36,11 @@ type LoadRequest = {
   courseId: string;
   mindMapId: string;
   nodeId: string;
+};
+
+type StatusRequest = {
+  courseId: string;
+  mindMapId: string;
 };
 
 type AiContextMenuState = {
@@ -52,6 +60,7 @@ declare global {
   interface Window {
     aistudyKnowledgeDocuments?: {
       load: (request: LoadRequest) => Promise<KnowledgeDocumentRecord | null>;
+      listStatuses: (request: StatusRequest) => Promise<KnowledgeDocumentStatus[]>;
       save: (input: KnowledgeDocumentSaveInput) => Promise<KnowledgeDocumentRecord>;
     };
   }
@@ -125,6 +134,21 @@ function readNativeScrollState(element: HTMLElement): ViewportScrollState {
   };
 }
 
+function areViewportScrollStatesEqual(left: ViewportScrollState, right: ViewportScrollState) {
+  return left.vertical.position === right.vertical.position &&
+    left.vertical.size === right.vertical.size &&
+    left.vertical.enabled === right.vertical.enabled &&
+    left.horizontal.position === right.horizontal.position &&
+    left.horizontal.size === right.horizontal.size &&
+    left.horizontal.enabled === right.horizontal.enabled;
+}
+
+function resetScrollTarget(element: HTMLElement | null | undefined) {
+  if (!element) return;
+  if (element.scrollTop !== 0) element.scrollTop = 0;
+  if (element.scrollLeft !== 0) element.scrollLeft = 0;
+}
+
 function readDomSelectedText(container: HTMLElement | null) {
   const selectionText = window.getSelection()?.toString().trim() ?? "";
   if (selectionText) return selectionText;
@@ -143,6 +167,57 @@ function readDomSelectedText(container: HTMLElement | null) {
   return "";
 }
 
+function flattenOutlineItems(items: MindMapOutlineItem[]) {
+  const flat: MindMapOutlineItem[] = [];
+  const visit = (item: MindMapOutlineItem) => {
+    if (item.nodeId) {
+      flat.push(item);
+    }
+    item.children.forEach(visit);
+  };
+  items.forEach(visit);
+  return flat;
+}
+
+const DOCUMENT_CONTENT_STRUCTURAL_KEYS = new Set([
+  "id",
+  "type",
+  "mode",
+  "name",
+  "style",
+  "styles",
+  "attrs",
+  "schemaVersion",
+  "editor",
+  "editorVersion",
+  "updatedAt"
+]);
+
+function hasDocumentContent(value: unknown): boolean {
+  if (typeof value === "string") {
+    return value.trim().length > 0;
+  }
+  if (Array.isArray(value)) {
+    return value.some(hasDocumentContent);
+  }
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  return Object.entries(value).some(([key, child]) => {
+    if (DOCUMENT_CONTENT_STRUCTURAL_KEYS.has(key)) return false;
+    return hasDocumentContent(child);
+  });
+}
+
+function isBlankDocumentSnapshot(snapshot: KnowledgeDocumentSnapshot | null | undefined) {
+  if (!snapshot?.content) return true;
+  return !hasDocumentContent(snapshot.content.header) &&
+    !hasDocumentContent(snapshot.content.main) &&
+    !hasDocumentContent(snapshot.content.footer) &&
+    !hasDocumentContent(snapshot.content.graffiti);
+}
+
 function clampAiPanelPoint(point: { x: number; y: number }) {
   const margin = 12;
   const maxX = Math.max(margin, window.innerWidth - AI_CONTEXT_PANEL_WIDTH - margin);
@@ -153,7 +228,13 @@ function clampAiPanelPoint(point: { x: number; y: number }) {
   };
 }
 
-export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }: KnowledgeDocumentWorkspaceProps) {
+export function KnowledgeDocumentWorkspace({
+  courseId,
+  mindMapId,
+  selectedNode,
+  outline,
+  onNodeSelect
+}: KnowledgeDocumentWorkspaceProps) {
   const mountRef = React.useRef<HTMLDivElement | null>(null);
   const toolbarAiButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const latestContextMenuPointRef = React.useRef({ x: 0, y: 0 });
@@ -163,6 +244,11 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
   const activeSaveRef = React.useRef<Promise<KnowledgeDocumentRecord | null>>(Promise.resolve(null));
   const latestSnapshotRef = React.useRef<KnowledgeDocumentSnapshot | null>(null);
   const loadSequenceRef = React.useRef(0);
+  const documentStatusMapRef = React.useRef<Map<string, KnowledgeDocumentStatus>>(new Map());
+  const documentStatusReadyRef = React.useRef(false);
+  const documentStatusLoadPromiseRef = React.useRef<Promise<void> | null>(null);
+  const documentStatusLoadSequenceRef = React.useRef(0);
+  const viewportUpdateFrameRef = React.useRef<number | null>(null);
   const [snapshot, setSnapshot] = React.useState<KnowledgeDocumentSnapshot | null>(null);
   const [formatState, setFormatState] = React.useState<KnowledgeDocumentFormatState>({
     fontSize: 16,
@@ -181,33 +267,121 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
     React.useState<ViewportScrollState>(EMPTY_VIEWPORT_SCROLL_STATE);
   const [assistantDraft, setAssistantDraft] = React.useState("");
   const [aiContextMenu, setAiContextMenu] = React.useState<AiContextMenuState | null>(null);
+  const [skipBlankPages, setSkipBlankPages] = React.useState(false);
+  const [isNavigatingDocument, setIsNavigatingDocument] = React.useState(false);
 
   const documentBinding = React.useMemo(
     () => createKnowledgeDocumentBinding(courseId, mindMapId, selectedNode.id),
     [courseId, mindMapId, selectedNode.id]
   );
   const canUseDocument = Boolean(documentBinding && snapshot);
+  const navigationItems = React.useMemo(() => flattenOutlineItems(outline), [outline]);
+  const currentNavigationIndex = React.useMemo(
+    () => navigationItems.findIndex((item) => item.nodeId === selectedNode.id),
+    [navigationItems, selectedNode.id]
+  );
+  const canNavigatePrevious = canUseDocument && currentNavigationIndex > 0 && Boolean(onNodeSelect);
+  const canNavigateNext = canUseDocument &&
+    currentNavigationIndex >= 0 &&
+    currentNavigationIndex < navigationItems.length - 1 &&
+    Boolean(onNodeSelect);
+
+  const upsertDocumentStatus = React.useCallback((status: KnowledgeDocumentStatus) => {
+    const nextMap = new Map(documentStatusMapRef.current);
+    nextMap.set(status.nodeId, status);
+    documentStatusMapRef.current = nextMap;
+  }, []);
+
+  const updateDocumentStatusFromSnapshot = React.useCallback(
+    (input: KnowledgeDocumentSaveInput, document?: KnowledgeDocumentRecord | null) => {
+      const existing = documentStatusMapRef.current.get(input.nodeId);
+      upsertDocumentStatus({
+        courseId: input.courseId,
+        mindMapId: input.mindMapId,
+        nodeId: input.nodeId,
+        documentId: document?.documentId ?? existing?.documentId ?? `${input.mindMapId}:${input.nodeId}`,
+        title: document?.title ?? input.title,
+        updatedAt: document?.updatedAt ?? new Date().toISOString(),
+        byteSize: document?.byteSize ?? existing?.byteSize ?? 0,
+        hasContent: document?.hasContent ?? !isBlankDocumentSnapshot(input.snapshot)
+      });
+    },
+    [upsertDocumentStatus]
+  );
+
+  React.useEffect(() => {
+    documentStatusMapRef.current = new Map();
+    documentStatusReadyRef.current = false;
+    documentStatusLoadPromiseRef.current = null;
+
+    const sequence = documentStatusLoadSequenceRef.current + 1;
+    documentStatusLoadSequenceRef.current = sequence;
+
+    if (!courseId || !mindMapId || !window.aistudyKnowledgeDocuments?.listStatuses) {
+      return;
+    }
+
+    const statusLoadTask = window.aistudyKnowledgeDocuments
+      .listStatuses({ courseId, mindMapId })
+      .then((statuses) => {
+        if (documentStatusLoadSequenceRef.current !== sequence) return;
+        const nextMap = new Map(statuses.map((status) => [status.nodeId, status]));
+        documentStatusMapRef.current.forEach((existingStatus, nodeId) => {
+          const loadedStatus = nextMap.get(nodeId);
+          if (
+            !loadedStatus ||
+            (existingStatus.updatedAt &&
+              (!loadedStatus.updatedAt || existingStatus.updatedAt > loadedStatus.updatedAt))
+          ) {
+            nextMap.set(nodeId, existingStatus);
+          }
+        });
+        documentStatusMapRef.current = nextMap;
+        documentStatusReadyRef.current = true;
+      })
+      .catch(() => {
+        if (documentStatusLoadSequenceRef.current === sequence) {
+          documentStatusReadyRef.current = false;
+        }
+      });
+    documentStatusLoadPromiseRef.current = statusLoadTask;
+    void statusLoadTask;
+  }, [courseId, mindMapId]);
+
+  const commitDocumentViewportState = React.useCallback((nextState: ViewportScrollState) => {
+    setDocumentViewportState((previousState) =>
+      areViewportScrollStatesEqual(previousState, nextState) ? previousState : nextState
+    );
+  }, []);
 
   const updateDocumentViewportState = React.useCallback(() => {
     const mount = mountRef.current;
-    setDocumentViewportState(mount ? readNativeScrollState(mount) : EMPTY_VIEWPORT_SCROLL_STATE);
-  }, []);
+    commitDocumentViewportState(mount ? readNativeScrollState(mount) : EMPTY_VIEWPORT_SCROLL_STATE);
+  }, [commitDocumentViewportState]);
+
+  const scheduleDocumentViewportStateUpdate = React.useCallback(() => {
+    if (viewportUpdateFrameRef.current !== null) return;
+    viewportUpdateFrameRef.current = window.requestAnimationFrame(() => {
+      viewportUpdateFrameRef.current = null;
+      updateDocumentViewportState();
+    });
+  }, [updateDocumentViewportState]);
 
   const resetDocumentViewportToStart = React.useCallback(() => {
     const mount = mountRef.current;
     if (!mount) {
-      setDocumentViewportState(EMPTY_VIEWPORT_SCROLL_STATE);
+      commitDocumentViewportState(EMPTY_VIEWPORT_SCROLL_STATE);
       return;
     }
 
-    mount.scrollTop = 0;
-    mount.scrollLeft = 0;
-    mount.querySelectorAll<HTMLElement>("*").forEach((element) => {
-      if (element.scrollTop !== 0) element.scrollTop = 0;
-      if (element.scrollLeft !== 0) element.scrollLeft = 0;
-    });
-    setDocumentViewportState(readNativeScrollState(mount));
-  }, []);
+    resetScrollTarget(mount);
+    const surface = mount.querySelector<HTMLElement>(".document-editor-surface");
+    resetScrollTarget(surface);
+    if (mount.firstElementChild instanceof HTMLElement && mount.firstElementChild !== surface) {
+      resetScrollTarget(mount.firstElementChild);
+    }
+    commitDocumentViewportState(readNativeScrollState(mount));
+  }, [commitDocumentViewportState]);
 
   const persistDocument = React.useCallback(
     async (input: PendingDocumentSave, silent = false): Promise<KnowledgeDocumentRecord | null> => {
@@ -216,6 +390,7 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
         if (!window.aistudyKnowledgeDocuments) {
           try {
             await saveLocalDocument(input);
+            updateDocumentStatusFromSnapshot(input, null);
             if (!silent) {
               setStorageMode("local");
               setSavedAt(formatSavedAt());
@@ -232,6 +407,7 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
         }
 
         const document = await window.aistudyKnowledgeDocuments.save(input);
+        updateDocumentStatusFromSnapshot(input, document);
         if (!silent) {
           setStorageMode("mysql");
           setSavedAt(formatSavedAt());
@@ -241,6 +417,7 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
       } catch (error) {
         try {
           await saveLocalDocument(input);
+          updateDocumentStatusFromSnapshot(input, null);
           if (!silent) {
             setStorageMode("local");
             setSavedAt(formatSavedAt());
@@ -258,7 +435,7 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
         if (!silent) setIsSaving(false);
       }
     },
-    []
+    [updateDocumentStatusFromSnapshot]
   );
 
   const flushPendingSave = React.useCallback(
@@ -305,7 +482,7 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
     editorRef.current = null;
     setIsEditorReady(false);
     setSnapshot(null);
-    setDocumentViewportState(EMPTY_VIEWPORT_SCROLL_STATE);
+    commitDocumentViewportState(EMPTY_VIEWPORT_SCROLL_STATE);
     resetDocumentViewportToStart();
     latestSnapshotRef.current = null;
     setSavedAt(null);
@@ -340,6 +517,18 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
         const document = await window.aistudyKnowledgeDocuments.load(request);
         if (loadSequenceRef.current !== sequence) return;
         const nextSnapshot = document?.snapshot ?? fallbackSnapshot;
+        if (document) {
+          upsertDocumentStatus({
+            courseId: document.courseId,
+            mindMapId: document.mindMapId,
+            nodeId: document.nodeId,
+            documentId: document.documentId,
+            title: document.title,
+            updatedAt: document.updatedAt,
+            byteSize: document.byteSize,
+            hasContent: document.hasContent
+          });
+        }
         setSnapshot(nextSnapshot);
         latestSnapshotRef.current = nextSnapshot;
         setStorageMode(document ? "mysql" : "none");
@@ -355,7 +544,7 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
         }
       }
     })();
-  }, [documentBinding, flushPendingSave, resetDocumentViewportToStart]);
+  }, [commitDocumentViewportState, documentBinding, flushPendingSave, resetDocumentViewportToStart, upsertDocumentStatus]);
 
   React.useEffect(() => {
     const mount = mountRef.current;
@@ -389,7 +578,7 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
         createCanvasDocumentEditor(editorSurface, snapshot, {
           onSnapshotChanged: (nextSnapshot) => {
             queueSnapshotSave(nextSnapshot);
-            window.requestAnimationFrame(updateDocumentViewportState);
+            scheduleDocumentViewportStateUpdate();
           },
           onFormatChanged: setFormatState,
           onAskAi: (selectedText) => {
@@ -450,17 +639,17 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
       setIsEditorReady(false);
       mount.replaceChildren();
     };
-  }, [canUseDocument, queueSnapshotSave, resetDocumentViewportToStart, snapshot, updateDocumentViewportState]);
+  }, [canUseDocument, queueSnapshotSave, resetDocumentViewportToStart, scheduleDocumentViewportStateUpdate, snapshot]);
 
   React.useEffect(() => {
     const mount = mountRef.current;
     if (!mount || !canUseDocument) {
-      setDocumentViewportState(EMPTY_VIEWPORT_SCROLL_STATE);
+      commitDocumentViewportState(EMPTY_VIEWPORT_SCROLL_STATE);
       return undefined;
     }
 
     let frameId: number | null = null;
-    const update = () => updateDocumentViewportState();
+    const update = () => scheduleDocumentViewportStateUpdate();
     const resizeObserver = new ResizeObserver(update);
     mount.addEventListener("scroll", update, { passive: true });
     resizeObserver.observe(mount);
@@ -469,7 +658,7 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
       frameId = null;
       const surface = mount.firstElementChild;
       if (surface) resizeObserver.observe(surface);
-      update();
+      updateDocumentViewportState();
     });
 
     return () => {
@@ -479,10 +668,14 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
         window.cancelAnimationFrame(frameId);
       }
     };
-  }, [canUseDocument, snapshot, updateDocumentViewportState]);
+  }, [canUseDocument, commitDocumentViewportState, scheduleDocumentViewportStateUpdate, snapshot, updateDocumentViewportState]);
 
   React.useEffect(() => {
     return () => {
+      if (viewportUpdateFrameRef.current !== null) {
+        window.cancelAnimationFrame(viewportUpdateFrameRef.current);
+        viewportUpdateFrameRef.current = null;
+      }
       void flushPendingSave(true);
       editorRef.current?.destroy();
     };
@@ -504,6 +697,92 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
   }, [documentBinding, flushPendingSave, selectedNode.title, snapshot]);
 
   const storageText = storageMode === "mysql" ? "已连接" : storageMode === "local" ? "本地副本" : "未保存";
+
+  const loadDocumentForNavigation = React.useCallback(
+    async (nodeId: string): Promise<KnowledgeDocumentSnapshot | null> => {
+      if (!courseId || !mindMapId) return null;
+
+      if (window.aistudyKnowledgeDocuments) {
+        try {
+          const remoteDocument = await window.aistudyKnowledgeDocuments.load({ courseId, mindMapId, nodeId });
+          if (remoteDocument?.snapshot) {
+            return remoteDocument.snapshot;
+          }
+        } catch {
+          // Remote lookup can fail independently; local fallback keeps navigation responsive.
+        }
+      }
+
+      return loadLocalDocument(courseId, mindMapId, nodeId);
+    },
+    [courseId, mindMapId]
+  );
+
+  const documentHasContentForNavigation = React.useCallback(
+    async (nodeId: string) => {
+      if (window.aistudyKnowledgeDocuments?.listStatuses) {
+        if (!documentStatusReadyRef.current) {
+          await documentStatusLoadPromiseRef.current?.catch(() => undefined);
+        }
+        if (documentStatusReadyRef.current) {
+          return documentStatusMapRef.current.get(nodeId)?.hasContent ?? false;
+        }
+      }
+
+      const candidateSnapshot = await loadDocumentForNavigation(nodeId);
+      return !isBlankDocumentSnapshot(candidateSnapshot);
+    },
+    [loadDocumentForNavigation]
+  );
+
+  const navigateDocument = React.useCallback(
+    async (direction: "previous" | "next") => {
+      if (!onNodeSelect || currentNavigationIndex < 0 || isNavigatingDocument) return;
+
+      const step = direction === "next" ? 1 : -1;
+      const endReachedMessage = direction === "next" ? "已经到最后一页" : "已经到第一页";
+      setIsNavigatingDocument(true);
+      setError("");
+
+      try {
+        await saveNow();
+
+        for (
+          let index = currentNavigationIndex + step;
+          index >= 0 && index < navigationItems.length;
+          index += step
+        ) {
+          const candidate = navigationItems[index];
+          if (!candidate.nodeId) continue;
+
+          if (!skipBlankPages) {
+            onNodeSelect(candidate.nodeId);
+            return;
+          }
+
+          if (await documentHasContentForNavigation(candidate.nodeId)) {
+            onNodeSelect(candidate.nodeId);
+            return;
+          }
+        }
+
+        setError(skipBlankPages ? "没有找到有内容的文档页" : endReachedMessage);
+      } catch (error) {
+        setError(getErrorMessage(error, "文档翻页失败"));
+      } finally {
+        setIsNavigatingDocument(false);
+      }
+    },
+    [
+      currentNavigationIndex,
+      documentHasContentForNavigation,
+      isNavigatingDocument,
+      navigationItems,
+      onNodeSelect,
+      saveNow,
+      skipBlankPages
+    ]
+  );
 
   const scrollDocumentViewport = React.useCallback(
     (axis: ViewportScrollAxis, position: number) => {
@@ -628,6 +907,37 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
           ))}
         </div>
         <span className="mindmap-toolbar-spacer" />
+        <div className="document-page-navigation" aria-label="文档翻页">
+          <button
+            type="button"
+            title="上一页"
+            onClick={() => void navigateDocument("previous")}
+            disabled={!canNavigatePrevious || isNavigatingDocument}
+          >
+            <ChevronLeft size={15} />
+            <span>上一页</span>
+          </button>
+          <button
+            type="button"
+            title="下一页"
+            onClick={() => void navigateDocument("next")}
+            disabled={!canNavigateNext || isNavigatingDocument}
+          >
+            <span>下一页</span>
+            <ChevronRight size={15} />
+          </button>
+          <button
+            type="button"
+            title={skipBlankPages ? "当前会跳过空白页" : "当前会显示空白页"}
+            className={skipBlankPages ? "document-skip-blank-button active" : "document-skip-blank-button"}
+            aria-pressed={skipBlankPages}
+            onClick={() => setSkipBlankPages((enabled) => !enabled)}
+            disabled={!canUseDocument || isNavigatingDocument}
+          >
+            <SkipForward size={15} />
+            <span>{skipBlankPages ? "跳空白" : "含空白"}</span>
+          </button>
+        </div>
         <button
           type="button"
           title="AI 助手"
@@ -683,6 +993,8 @@ export function KnowledgeDocumentWorkspace({ courseId, mindMapId, selectedNode }
       <div className="document-status-strip">
         <span>{canUseDocument ? selectedNode.title || "未命名" : "未选择节点"}</span>
         <span>{storageText}</span>
+        {skipBlankPages ? <span>跳过空白页</span> : null}
+        {isNavigatingDocument ? <span>切换中</span> : null}
         {savedAt ? <span>已保存 {savedAt}</span> : null}
         {error ? <span className="mindmap-error">{error}</span> : null}
       </div>

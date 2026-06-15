@@ -515,7 +515,10 @@ export function MindMapWorkspace({
         setMapId(nextMapId);
       }
 
-      setSnapshot(nextSnapshot);
+      snapshotRef.current = nextSnapshot;
+      React.startTransition(() => {
+        setSnapshot(nextSnapshot);
+      });
       pendingSaveRef.current = {
         courseId,
         mapId: nextMapId,
@@ -668,6 +671,16 @@ export function MindMapWorkspace({
     [canUseEditor, publishSelectedNode, selectedNode.id]
   );
 
+  const selectDocumentNode = React.useCallback(
+    (nodeId: string) => {
+      const item = findOutlineItem(outline, nodeId);
+      const rootNodeId = outline[0]?.nodeId ?? null;
+      publishSelectedNode({ id: nodeId, title: item?.title ?? "" });
+      setFocusedNodeId(nodeId === rootNodeId ? null : nodeId);
+    },
+    [outline, publishSelectedNode]
+  );
+
   if (!courseId || !snapshot || !focusedSnapshot) {
     return (
       <div className="mindmap-placeholder">
@@ -687,7 +700,13 @@ export function MindMapWorkspace({
   if (editorMode === "word") {
     return (
       <div className="mindmap-workspace" data-editor-mode="word">
-        <KnowledgeDocumentWorkspace courseId={courseId} mindMapId={mapId} selectedNode={selectedNode} />
+        <KnowledgeDocumentWorkspace
+          courseId={courseId}
+          mindMapId={mapId}
+          selectedNode={selectedNode}
+          outline={outline}
+          onNodeSelect={selectDocumentNode}
+        />
       </div>
     );
   }
