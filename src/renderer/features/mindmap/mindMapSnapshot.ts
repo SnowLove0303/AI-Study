@@ -74,8 +74,8 @@ export function createXMindStyleThemeConfig() {
     },
     second: {
       shape: "roundedRectangle",
-      marginX: 92,
-      marginY: 34,
+      marginX: 112,
+      marginY: 48,
       fillColor: "#eaf6ff",
       color: "#17466f",
       fontFamily: MIND_MAP_FONT_FAMILY,
@@ -89,8 +89,8 @@ export function createXMindStyleThemeConfig() {
     },
     node: {
       shape: "roundedRectangle",
-      marginX: 78,
-      marginY: 28,
+      marginX: 96,
+      marginY: 42,
       fillColor: "#fff8ee",
       color: "#425466",
       fontFamily: MIND_MAP_FONT_FAMILY,
@@ -104,8 +104,8 @@ export function createXMindStyleThemeConfig() {
     },
     generalization: {
       shape: "roundedRectangle",
-      marginX: 88,
-      marginY: 34,
+      marginX: 104,
+      marginY: 44,
       fillColor: "#ffffff",
       color: "#334155",
       fontFamily: MIND_MAP_FONT_FAMILY,

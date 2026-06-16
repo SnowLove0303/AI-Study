@@ -715,9 +715,10 @@ h3 {
 }
 
 .smm-node-edit-wrap {
-  border: 1px solid rgba(31, 111, 209, 0.22);
-  border-radius: 8px;
-  box-shadow: 0 8px 18px rgba(23, 27, 33, 0.08) !important;
+  border: 0;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none !important;
   line-height: 1.25 !important;
   word-break: keep-all !important;
   overflow-wrap: normal !important;

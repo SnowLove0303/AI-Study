@@ -12,10 +12,10 @@ const TEXT_COLORS = ["#17466f", "#1f6fd1", "#0f766e", "#b45309", "#b91c1c", "#7c
 const FONT_SIZE_OPTIONS = [12, 14, 16, 18, 20, 24, 28, 32];
 const NODE_WIDTH_OPTIONS = [
   { value: "auto", label: "自动" },
-  { value: "360", label: "360" },
-  { value: "460", label: "460" },
-  { value: "560", label: "560" },
-  { value: "680", label: "680" }
+  { value: "260", label: "260" },
+  { value: "320", label: "320" },
+  { value: "420", label: "420" },
+  { value: "560", label: "560" }
 ];
 
 function normalizeColor(value: string | undefined) {

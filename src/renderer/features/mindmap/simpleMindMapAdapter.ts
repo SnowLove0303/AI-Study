@@ -37,11 +37,10 @@ const EMPTY_MIND_MAP_VIEWPORT_STATE: MindMapViewportState = {
   vertical: { position: 0, size: 100, enabled: false },
   horizontal: { position: 0, size: 100, enabled: false }
 };
-const DEFAULT_NODE_TEXT_WRAP_WIDTH = 460;
-const MIN_NODE_TEXT_WRAP_WIDTH = 220;
-const MAX_NODE_TEXT_WRAP_WIDTH = 760;
+const DEFAULT_NODE_TEXT_WRAP_WIDTH = 300;
+const MIN_NODE_TEXT_WRAP_WIDTH = 160;
+const MAX_NODE_TEXT_WRAP_WIDTH = 560;
 const INITIAL_VIEW_SCALE = 1;
-const TEXT_EDIT_PREVIEW_DELAY_MS = 360;
 
 let pluginsRegistered = false;
 let xmindExportPluginPromise: Promise<SimpleMindMapPlugin> | null = null;
@@ -145,7 +144,7 @@ async function ensureXMindExportPlugin(editor: any) {
 function toEditorData(snapshot: MindMapSnapshot) {
   const layout = normalizeLayout(snapshot.layout);
   return {
-    root: normalizeMindMapTree(snapshot.root),
+    root: applyLayoutSafeTextWidths(normalizeMindMapTree(snapshot.root)),
     layout,
     theme: {
       template: snapshot.theme?.template ?? "default",
@@ -392,6 +391,22 @@ function normalizeTextWrapWidth(value: unknown) {
   const width = Number(value);
   if (!Number.isFinite(width) || width <= 0) return undefined;
   return Math.min(MAX_NODE_TEXT_WRAP_WIDTH, Math.max(MIN_NODE_TEXT_WRAP_WIDTH, Math.round(width)));
+}
+
+function applyLayoutSafeTextWidths(node: MindMapSnapshot["root"]): MindMapSnapshot["root"] {
+  const data = { ...node.data } as Record<string, unknown>;
+  const customTextWidth = normalizeTextWrapWidth(data.customTextWidth);
+  if (customTextWidth === undefined) {
+    delete data.customTextWidth;
+  } else {
+    data.customTextWidth = customTextWidth;
+  }
+
+  return {
+    ...node,
+    data: data as MindMapSnapshot["root"]["data"],
+    children: Array.isArray(node.children) ? node.children.map(applyLayoutSafeTextWidths) : []
+  };
 }
 
 function applyNodeTextWrapWidth(editor: any, node: any, width: number | undefined) {
@@ -665,55 +680,39 @@ export async function createSimpleMindMapEditor(
 
   let selectedRenderNode: any = null;
   let selectedNodeId: string | null = null;
-  let textEditPreviewTimer: number | null = null;
-  let textEditPreviewFrame: number | null = null;
-  let pendingTextEditPreview: { node: any; text: string } | null = null;
+  let editingTextNode: any = null;
 
-  const clearTextEditPreview = () => {
-    pendingTextEditPreview = null;
-    if (textEditPreviewTimer !== null) {
-      window.clearTimeout(textEditPreviewTimer);
-      textEditPreviewTimer = null;
-    }
-    if (textEditPreviewFrame !== null) {
-      window.cancelAnimationFrame(textEditPreviewFrame);
-      textEditPreviewFrame = null;
-    }
+  const setNodeTextOpacity = (node: any, opacity: number) => {
+    node?._textData?.node?.opacity?.(opacity);
   };
 
-  const renderTextEditPreview = () => {
-    textEditPreviewFrame = null;
-    const preview = pendingTextEditPreview;
-    pendingTextEditPreview = null;
-    if (destroyed || !preview?.node || typeof preview.text !== "string") return;
+  const hideEditingNodeText = () => {
     const currentEditNode = editor.renderer?.textEdit?.getCurrentEditNode?.();
-    if (currentEditNode && currentEditNode !== preview.node) return;
-    if (typeof preview.node.createTextNode !== "function" || typeof preview.node.getNodeRect !== "function") return;
-
-    preview.node._textData = preview.node.createTextNode(preview.text);
-    const rect = preview.node.getNodeRect();
-    preview.node.width = rect.width;
-    preview.node.height = rect.height;
-    preview.node.layout?.();
-    editor.render?.(() => {
-      editor.scrollbar?.updateScrollbar?.();
-      scheduleViewportSync();
-    });
+    editingTextNode = currentEditNode ?? editingTextNode;
+    setNodeTextOpacity(editingTextNode, 0);
   };
 
-  const scheduleTextEditPreview = ({ node, text }: { node?: unknown; text?: unknown }) => {
+  const restoreEditingNodeText = () => {
+    setNodeTextOpacity(editingTextNode, 1);
+    editingTextNode = null;
+  };
+
+  const applyTextEditPreview = ({ node, text }: { node?: unknown; text?: unknown }) => {
+    if (destroyed) return;
     if (!node || typeof node !== "object" || typeof text !== "string") return;
-    pendingTextEditPreview = { node, text };
-    if (textEditPreviewTimer !== null) {
-      window.clearTimeout(textEditPreviewTimer);
-    }
-    textEditPreviewTimer = window.setTimeout(() => {
-      textEditPreviewTimer = null;
-      if (textEditPreviewFrame !== null) {
-        window.cancelAnimationFrame(textEditPreviewFrame);
-      }
-      textEditPreviewFrame = window.requestAnimationFrame(renderTextEditPreview);
-    }, TEXT_EDIT_PREVIEW_DELAY_MS);
+    const previewNode = node as any;
+    const currentEditNode = editor.renderer?.textEdit?.getCurrentEditNode?.();
+    if (currentEditNode && currentEditNode !== previewNode) return;
+    if (typeof previewNode.createTextNode !== "function" || typeof previewNode.getNodeRect !== "function") return;
+
+    previewNode._textData = previewNode.createTextNode(text);
+    const rect = previewNode.getNodeRect();
+    previewNode.width = rect.width;
+    previewNode.height = rect.height;
+    previewNode.layout?.();
+    editingTextNode = previewNode;
+    hideEditingNodeText();
+    scheduleViewportSync();
   };
 
   const emitSelection = (node: unknown) => {
@@ -746,9 +745,9 @@ export async function createSimpleMindMapEditor(
   };
   editor.on("node_active", emitSelectionWithCache);
   editor.on("node_tree_render_end", syncSelectionFromActiveList);
-  editor.on("node_text_edit_change", scheduleTextEditPreview);
-  editor.on("before_show_text_edit", clearTextEditPreview);
-  editor.on("hide_text_edit", clearTextEditPreview);
+  editor.on("node_text_edit_change", applyTextEditPreview);
+  editor.on("before_show_text_edit", hideEditingNodeText);
+  editor.on("hide_text_edit", restoreEditingNodeText);
   editor.on("node_dragend", syncAfterNodeDrag);
   setScrollbarWrapSize(el.clientWidth, el.clientHeight);
   events.onReady?.();
@@ -849,11 +848,11 @@ export async function createSimpleMindMapEditor(
       editor.off("scrollbar_change", emitPluginViewportState);
       editor.off("node_active", emitSelectionWithCache);
       editor.off("node_tree_render_end", syncSelectionFromActiveList);
-      editor.off("node_text_edit_change", scheduleTextEditPreview);
-      editor.off("before_show_text_edit", clearTextEditPreview);
-      editor.off("hide_text_edit", clearTextEditPreview);
+      editor.off("node_text_edit_change", applyTextEditPreview);
+      editor.off("before_show_text_edit", hideEditingNodeText);
+      editor.off("hide_text_edit", restoreEditingNodeText);
       editor.off("node_dragend", syncAfterNodeDrag);
-      clearTextEditPreview();
+      restoreEditingNodeText();
       editor.destroy();
     }
   };
