@@ -743,7 +743,7 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
     : ["textarea", "[contenteditable='true']", "[role='textbox']"];
   const assistantSelectors = provider === "chatgpt"
     ? ["[data-message-author-role='assistant']", "article[data-testid^='conversation-turn-']", "section[data-testid^='conversation-turn-']"]
-    : ["[class*='message']", "[class*='answer']", "[class*='assistant']", "[class*='conversation']", "[class*='chat']"];
+    : ["[aria-label='doc_editor'] .v_list_row", "[aria-label='doc_editor'] [class*='message']"];
   const gateWords = provider === "chatgpt"
     ? ["Log in", "Sign up", "登录", "注册", "验证", "captcha", "Cloudflare", "Checking your browser"]
     : ["扫码登录", "手机号登录", "请先登录", "立即登录", "验证码", "滑块验证", "安全验证", "操作频繁"];
@@ -753,6 +753,7 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
 
   return `
 (async () => {
+  const provider = ${JSON.stringify(provider)};
   const prompt = ${JSON.stringify(prompt)};
   const inputSelectors = ${JSON.stringify(inputSelectors)};
   const assistantSelectors = ${JSON.stringify(assistantSelectors)};
@@ -792,6 +793,21 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
     return lines.join("\\n").trim();
   };
   const hasGate = () => gateWords.some((word) => bodyText().includes(word));
+  const getDoubaoMessageRows = () => Array.from(document.querySelectorAll("[aria-label='doc_editor'] .v_list_row"))
+    .filter(visible);
+  const isDoubaoUserRow = (row) => Boolean(row.querySelector("[class*='bg-g-send-msg-bubble-bg']"));
+  const getDoubaoReplyText = (row) => {
+    const contentRoots = Array.from(row.querySelectorAll(".md-box-root,[class*='md-box-root'],[class*='markdown'],[class*='answer']"))
+      .filter(visible)
+      .map((element) => element.innerText || element.textContent || "")
+      .map((text) => text.trim())
+      .filter(Boolean);
+    if (contentRoots.length > 0) {
+      return contentRoots.sort((left, right) => left.length - right.length)[0];
+    }
+    return row.innerText || row.textContent || "";
+  };
+  const beforeDoubaoRowCount = provider === "doubao" ? getDoubaoMessageRows().length : 0;
   const input = inputSelectors.map((selector) => document.querySelector(selector)).find(visible);
   if (!input) {
     return { ok: false, blocker: hasGate() ? "login-or-verification" : "input-not-found", reply: "" };
@@ -856,6 +872,15 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
   }
 
   const getLatestAssistantReply = () => {
+    if (provider === "doubao") {
+      const rows = getDoubaoMessageRows();
+      const newRows = rows.slice(Math.max(0, beforeDoubaoRowCount));
+      const candidates = (newRows.length ? newRows : rows.slice(-4)).filter((row) => !isDoubaoUserRow(row));
+      for (let index = candidates.length - 1; index >= 0; index -= 1) {
+        const reply = cleanReply(getDoubaoReplyText(candidates[index]));
+        if (reply) return reply;
+      }
+    }
     const assistantBlocks = assistantSelectors
       .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
       .filter(visible);

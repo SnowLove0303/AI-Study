@@ -112,6 +112,14 @@ function toFormatState(payload: IRangeStyle): KnowledgeDocumentFormatState {
   };
 }
 
+function readEditorRangeText(editor: CanvasEditorInstance) {
+  try {
+    return editor.command.getRangeText().trim();
+  } catch {
+    return "";
+  }
+}
+
 function getLandscapePageSize(container: HTMLDivElement) {
   const availableWidth = container.parentElement?.clientWidth ?? container.clientWidth;
   const width = Math.max(MIN_LANDSCAPE_PAGE_WIDTH, Math.floor(availableWidth - DOCUMENT_PAGE_GUTTER));
@@ -145,11 +153,21 @@ export async function createCanvasDocumentEditor(
     margins: [64, 64, 64, 64]
   });
 
+  let lastSelectedText = "";
+  const rememberSelectedText = () => {
+    const selectedText = readEditorRangeText(editor);
+    if (selectedText) {
+      lastSelectedText = selectedText;
+    }
+    return selectedText;
+  };
+
   editor.listener.contentChange = () => {
     events.onSnapshotChanged?.(toSnapshot(editor));
   };
   editor.listener.rangeStyleChange = (payload) => {
     events.onFormatChanged?.(toFormatState(payload));
+    rememberSelectedText();
   };
   editor.register.contextMenuList([
     {
@@ -157,21 +175,14 @@ export async function createCanvasDocumentEditor(
       name: "问 AI",
       when: (context) => context.editorHasSelection,
       callback: () => {
-        const selectedText = editor.command.getRangeText().trim();
-        if (selectedText) events.onAskAi?.(selectedText);
+        events.onAskAi?.(rememberSelectedText() || lastSelectedText);
       }
     }
   ]);
 
   return {
     getSnapshot: () => toSnapshot(editor),
-    getSelectedText: () => {
-      try {
-        return editor.command.getRangeText().trim();
-      } catch {
-        return "";
-      }
-    },
+    getSelectedText: () => rememberSelectedText() || lastSelectedText,
     exec: (command) => {
       if (command === "undo") editor.command.executeUndo();
       if (command === "redo") editor.command.executeRedo();

@@ -220,6 +220,16 @@ function clampAiPanelPoint(point: { x: number; y: number }) {
   };
 }
 
+function getAiPanelAnchorPoint(anchor: HTMLElement | null, fallback: { x: number; y: number }) {
+  const rect = anchor?.getBoundingClientRect();
+  if (!rect) return fallback;
+
+  return {
+    x: rect.right - AI_CONTEXT_PANEL_WIDTH,
+    y: rect.bottom + 8
+  };
+}
+
 export function KnowledgeDocumentWorkspace({
   courseId,
   mindMapId,
@@ -231,6 +241,9 @@ export function KnowledgeDocumentWorkspace({
   const toolbarAiButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const aiPanelRef = React.useRef<HTMLDivElement | null>(null);
   const latestContextMenuPointRef = React.useRef({ x: 0, y: 0 });
+  const lastSelectedTextRef = React.useRef("");
+  const ignoreNextAiOutsideClickRef = React.useRef(false);
+  const aiContextMenuOpenRef = React.useRef(false);
   const editorRef = React.useRef<KnowledgeDocumentEditorHandle | null>(null);
   const saveTimerRef = React.useRef<number | null>(null);
   const pendingSaveRef = React.useRef<PendingDocumentSave | null>(null);
@@ -269,6 +282,12 @@ export function KnowledgeDocumentWorkspace({
   );
   const canUseDocument = Boolean(documentBinding && snapshot);
   const navigationItems = React.useMemo(() => flattenOutlineItems(outline), [outline]);
+  const documentKey = React.useMemo(
+    () => (documentBinding ? `${documentBinding.courseId}:${documentBinding.mindMapId}:${documentBinding.nodeId}` : "none"),
+    [documentBinding]
+  );
+  const documentKeyRef = React.useRef(documentKey);
+  documentKeyRef.current = documentKey;
   const currentNavigationIndex = React.useMemo(
     () => navigationItems.findIndex((item) => item.nodeId === selectedNode.id),
     [navigationItems, selectedNode.id]
@@ -375,6 +394,14 @@ export function KnowledgeDocumentWorkspace({
     }
     commitDocumentViewportState(readNativeScrollState(mount));
   }, [commitDocumentViewportState]);
+
+  React.useLayoutEffect(() => {
+    editorRef.current?.destroy();
+    editorRef.current = null;
+    setIsEditorReady(false);
+    mountRef.current?.replaceChildren();
+    commitDocumentViewportState(EMPTY_VIEWPORT_SCROLL_STATE);
+  }, [commitDocumentViewportState, documentKey]);
 
   const persistDocument = React.useCallback(
     async (input: PendingDocumentSave, silent = false): Promise<KnowledgeDocumentRecord | null> => {
@@ -545,6 +572,7 @@ export function KnowledgeDocumentWorkspace({
     let isDisposed = false;
     let isCreating = false;
     let frameId: number | null = null;
+    const editorDocumentKey = documentKey;
 
     const createEditor = () => {
       if (isDisposed || isCreating || editorRef.current) return;
@@ -554,6 +582,10 @@ export function KnowledgeDocumentWorkspace({
       frameId = window.requestAnimationFrame(() => {
         frameId = null;
         if (isDisposed || editorRef.current) {
+          isCreating = false;
+          return;
+        }
+        if (documentKeyRef.current !== editorDocumentKey) {
           isCreating = false;
           return;
         }
@@ -567,6 +599,7 @@ export function KnowledgeDocumentWorkspace({
         setIsEditorReady(false);
         const editorSurface = document.createElement("div");
         editorSurface.className = "document-editor-surface";
+        editorSurface.dataset.documentKey = editorDocumentKey;
         mount.appendChild(editorSurface);
         createCanvasDocumentEditor(editorSurface, snapshot, {
           onSnapshotChanged: (nextSnapshot) => {
@@ -575,16 +608,26 @@ export function KnowledgeDocumentWorkspace({
           },
           onFormatChanged: setFormatState,
           onAskAi: (selectedText) => {
-            const point = latestContextMenuPointRef.current;
-            setAssistantDraft(selectedText);
+            const assistantText = selectedText.trim() || lastSelectedTextRef.current;
+            if (assistantText) {
+              lastSelectedTextRef.current = assistantText;
+            }
+            const point = getAiPanelAnchorPoint(toolbarAiButtonRef.current, latestContextMenuPointRef.current);
+            ignoreNextAiOutsideClickRef.current = aiContextMenuOpenRef.current;
+            setAssistantDraft(assistantText);
             setAiContextMenu({
               ...clampAiPanelPoint(point),
-              text: selectedText
+              text: assistantText
             });
           }
         })
           .then((editor) => {
-            if (isDisposed || editorRef.current || editorSurface.parentElement !== mount) {
+            if (
+              isDisposed ||
+              editorRef.current ||
+              editorSurface.parentElement !== mount ||
+              documentKeyRef.current !== editorDocumentKey
+            ) {
               editor.destroy();
               editorSurface.remove();
               return;
@@ -632,7 +675,7 @@ export function KnowledgeDocumentWorkspace({
       setIsEditorReady(false);
       mount.replaceChildren();
     };
-  }, [canUseDocument, queueSnapshotSave, resetDocumentViewportToStart, scheduleDocumentViewportStateUpdate, snapshot]);
+  }, [canUseDocument, documentKey, queueSnapshotSave, resetDocumentViewportToStart, scheduleDocumentViewportStateUpdate, snapshot]);
 
   React.useEffect(() => {
     const mount = mountRef.current;
@@ -797,11 +840,18 @@ export function KnowledgeDocumentWorkspace({
   );
 
   const readSelectedText = React.useCallback(() => {
-    return editorRef.current?.getSelectedText() || readDomSelectedText(mountRef.current);
+    const selectedText = editorRef.current?.getSelectedText() || readDomSelectedText(mountRef.current);
+    if (selectedText) {
+      lastSelectedTextRef.current = selectedText;
+    }
+    return selectedText;
   }, []);
 
   const openAssistantPanel = React.useCallback((point: { x: number; y: number }, text?: string) => {
-    const selectedText = text?.trim() || readSelectedText().trim();
+    const selectedText = text?.trim() || readSelectedText().trim() || lastSelectedTextRef.current;
+    if (selectedText) {
+      lastSelectedTextRef.current = selectedText;
+    }
     setAssistantDraft(selectedText);
     setAiContextMenu({
       ...clampAiPanelPoint(point),
@@ -817,9 +867,17 @@ export function KnowledgeDocumentWorkspace({
   }, []);
 
   React.useEffect(() => {
+    aiContextMenuOpenRef.current = Boolean(aiContextMenu);
+  }, [aiContextMenu]);
+
+  React.useEffect(() => {
     if (!aiContextMenu) return undefined;
     const closeMenu = (event: MouseEvent) => {
       if (event.defaultPrevented) return;
+      if (ignoreNextAiOutsideClickRef.current) {
+        ignoreNextAiOutsideClickRef.current = false;
+        return;
+      }
       const target = event.target instanceof Node ? event.target : null;
       if (
         target &&
@@ -945,11 +1003,10 @@ export function KnowledgeDocumentWorkspace({
           className={aiContextMenu ? "document-ai-toolbar-button active" : "document-ai-toolbar-button"}
           onClick={(event) => {
             event.stopPropagation();
-            const rect = toolbarAiButtonRef.current?.getBoundingClientRect();
-            openAssistantPanel({
-              x: rect ? rect.left : window.innerWidth - 460,
-              y: rect ? rect.bottom + 6 : 96
-            });
+            openAssistantPanel(getAiPanelAnchorPoint(toolbarAiButtonRef.current, {
+              x: window.innerWidth - AI_CONTEXT_PANEL_WIDTH - 12,
+              y: 96
+            }));
           }}
           disabled={!canUseDocument}
         >
