@@ -23,6 +23,7 @@ type AiAssistantPanelProps = {
   contextText?: string;
   compact?: boolean;
   initialInput?: string;
+  autoSubmitInitialInput?: boolean;
   onInitialInputConsumed?: () => void;
   onClose?: () => void;
   title?: string;
@@ -56,6 +57,7 @@ export function AiAssistantPanel({
   nodeTitle = "",
   compact = false,
   initialInput = "",
+  autoSubmitInitialInput = false,
   onInitialInputConsumed,
   onClose,
   title,
@@ -80,21 +82,7 @@ export function AiAssistantPanel({
     messagesRef.current?.scrollTo({ top: messagesRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, isPending]);
 
-  React.useEffect(() => {
-    const selectedText = initialInput.trim();
-    if (!selectedText) return;
-
-    setInput((current) => {
-      const currentText = current.trim();
-      return currentText ? `${selectedText}\n\n${currentText}` : selectedText;
-    });
-    onInitialInputConsumed?.();
-    window.setTimeout(() => textareaRef.current?.focus(), 0);
-  }, [initialInput, onInitialInputConsumed]);
-
-  const sendMessage = React.useCallback(async (event?: React.FormEvent<HTMLFormElement>) => {
-    event?.preventDefault();
-    const message = input.trim();
+  const sendPrompt = React.useCallback(async (message: string) => {
     if (!message || isPending) return;
 
     const userMessage: AiChatMessage = {
@@ -138,7 +126,31 @@ export function AiAssistantPanel({
     } finally {
       setIsPending(false);
     }
-  }, [input, isPending, provider]);
+  }, [isPending, provider]);
+
+  React.useEffect(() => {
+    const selectedText = initialInput.trim();
+    if (!selectedText) return;
+
+    onInitialInputConsumed?.();
+    if (autoSubmitInitialInput) {
+      setInput("");
+      void sendPrompt(selectedText);
+      return;
+    }
+
+    setInput((current) => {
+      const currentText = current.trim();
+      return currentText ? `${selectedText}\n\n${currentText}` : selectedText;
+    });
+    window.setTimeout(() => textareaRef.current?.focus(), 0);
+  }, [autoSubmitInitialInput, initialInput, onInitialInputConsumed, sendPrompt]);
+
+  const sendMessage = React.useCallback(async (event?: React.FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+    const message = input.trim();
+    await sendPrompt(message);
+  }, [input, sendPrompt]);
 
   return (
     <main className={compact ? "assistant-layout compact" : "assistant-layout"} aria-label="AI 聊天助手">
