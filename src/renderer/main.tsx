@@ -380,6 +380,7 @@ function App() {
   const [courses, setCourses] = React.useState<Course[]>([]);
   const [activeCourseId, setActiveCourseId] = React.useState<string | null>(null);
   const [isHydrated, setIsHydrated] = React.useState(false);
+  const [hasLoadedCourseStore, setHasLoadedCourseStore] = React.useState(false);
   const [storageError, setStorageError] = React.useState("");
   const [searchQuery, setSearchQuery] = React.useState("");
   const [dialogMode, setDialogMode] = React.useState<CourseDialogMode | null>(null);
@@ -408,6 +409,7 @@ function App() {
         if (isCancelled) return;
         setCourses(store.courses);
         setActiveCourseId(store.activeCourseId);
+        setHasLoadedCourseStore(true);
         setStorageError("");
       })
       .catch(() => {
@@ -426,12 +428,12 @@ function App() {
   }, []);
 
   React.useEffect(() => {
-    if (!isHydrated) return;
+    if (!isHydrated || !hasLoadedCourseStore) return;
     const store = { courses, activeCourseId };
     saveCourseStore(store)
       .then(() => setStorageError(""))
       .catch(() => setStorageError("课程数据保存失败，请稍后重试。"));
-  }, [activeCourseId, courses, isHydrated]);
+  }, [activeCourseId, courses, hasLoadedCourseStore, isHydrated]);
 
   React.useEffect(() => {
     if (activeCourseId && !courses.some((course) => course.id === activeCourseId)) {

@@ -4,14 +4,23 @@
 
 ## 最新版本
 
-- 版本号：0.1.6
-- 更新时间：2026-06-16 22:13:48
-- 功能更新：优化思维导图文本编辑体验；去除编辑态双底框；输入时节点外框零延迟适应文本宽高
+- 版本号：0.1.7
+- 更新时间：2026-06-16 23:47:02
+- 功能更新：修复课程读取失败时的空白列表；课程数据改为 MySQL 与本地 courses.json 双保险
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：feature/core-logic-freeze-20260616
-- 提交：339eb5d5
+- 提交：63304a8f
 
 ## 更新记录
+
+### 0.1.7 - 2026-06-16 23:47:02
+
+- 修复课程读取失败时的空白列表
+- 课程数据改为 MySQL 与本地 courses.json 双保险
+- GitHub：https://github.com/SnowLove0303/AI-Study.git
+- 分支：feature/core-logic-freeze-20260616
+- 提交：63304a8f
+
 
 ### 0.1.6 - 2026-06-16 22:13:48
 

@@ -1612,6 +1612,29 @@ function toMysqlDate(value: string) {
   return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
 }
 
+function getCourseStoreFilePath() {
+  return path.join(app.getPath("userData"), "courses.json");
+}
+
+async function readLocalCourseStore(): Promise<CourseStore> {
+  try {
+    const raw = await fs.readFile(getCourseStoreFilePath(), "utf8");
+    return normalizeCourseStore(JSON.parse(raw));
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return { courses: [], activeCourseId: null };
+    }
+    throw error;
+  }
+}
+
+async function writeLocalCourseStore(store: CourseStore) {
+  const normalized = normalizeCourseStore(store);
+  await fs.mkdir(path.dirname(getCourseStoreFilePath()), { recursive: true });
+  await fs.writeFile(getCourseStoreFilePath(), JSON.stringify(normalized, null, 2), "utf8");
+  return normalized;
+}
+
 async function pathExists(filePath: string) {
   try {
     await fs.access(filePath);
@@ -1854,21 +1877,32 @@ async function getUpdateManagerInfo(): Promise<UpdateManagerInfo> {
 }
 
 async function readCourseStore(): Promise<CourseStore> {
-  const { pool, courseTable } = await getMysqlRuntime();
-  const [rows] = await pool.execute<CourseRow[]>(
-    `SELECT id, name, description, created_at AS createdAt, updated_at AS updatedAt
-     FROM ${courseTable}
-     ORDER BY updated_at DESC`
-  );
-  const courses = rows.map((row) => ({
-    id: row.id,
-    name: row.name,
-    description: row.description,
-    createdAt: toIsoTimestamp(row.createdAt),
-    updatedAt: toIsoTimestamp(row.updatedAt)
-  }));
+  try {
+    const { pool, courseTable } = await getMysqlRuntime();
+    const [rows] = await pool.execute<CourseRow[]>(
+      `SELECT id, name, description, created_at AS createdAt, updated_at AS updatedAt
+       FROM ${courseTable}
+       ORDER BY updated_at DESC`
+    );
+    const courses = rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      createdAt: toIsoTimestamp(row.createdAt),
+      updatedAt: toIsoTimestamp(row.updatedAt)
+    }));
+    const store = { courses, activeCourseId: courses[0]?.id ?? null };
+    if (courses.length > 0) {
+      void writeLocalCourseStore(store).catch((error) => {
+        console.warn("Course local mirror write failed.", error);
+      });
+    }
 
-  return { courses, activeCourseId: courses[0]?.id ?? null };
+    return store;
+  } catch (error) {
+    console.warn("Course MySQL read failed. Falling back to local course store.", error);
+    return await readLocalCourseStore();
+  }
 }
 
 async function replaceCourseRows(connection: PoolConnection, courseTable: string, courses: CourseRecord[]) {
@@ -1903,19 +1937,25 @@ async function replaceCourseRows(connection: PoolConnection, courseTable: string
 
 async function writeCourseStore(store: CourseStore) {
   const normalized = normalizeCourseStore(store);
-  const { pool, courseTable } = await getMysqlRuntime();
-  const connection = await pool.getConnection();
-
   try {
-    await connection.beginTransaction();
-    await replaceCourseRows(connection, courseTable, normalized.courses);
-    await connection.commit();
-    return normalized;
+    const { pool, courseTable } = await getMysqlRuntime();
+    const connection = await pool.getConnection();
+
+    try {
+      await connection.beginTransaction();
+      await replaceCourseRows(connection, courseTable, normalized.courses);
+      await connection.commit();
+      await writeLocalCourseStore(normalized);
+      return normalized;
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
   } catch (error) {
-    await connection.rollback();
-    throw error;
-  } finally {
-    connection.release();
+    console.warn("Course MySQL write failed. Saving to local course store.", error);
+    return await writeLocalCourseStore(normalized);
   }
 }
 
