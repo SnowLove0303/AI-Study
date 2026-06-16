@@ -63,7 +63,8 @@ export type KnowledgeDocumentEditorHandle = {
   exec: (command: KnowledgeDocumentCommand) => void;
   setFontSize: (size: number) => void;
   setColor: (color: string) => void;
-  applyFormat: (format: KnowledgeDocumentFormatState, currentFormat: KnowledgeDocumentFormatState) => void;
+  captureFormat: () => KnowledgeDocumentFormatState | null;
+  applyFormat: (format: KnowledgeDocumentFormatState) => boolean;
   focus: () => void;
   destroy: () => void;
 };

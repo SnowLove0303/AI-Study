@@ -1,5 +1,5 @@
 import React from "react";
-import { Bold, Bot, ChevronLeft, ChevronRight, Italic, Paintbrush, Redo2, Repeat2, Save, SkipForward, Type, Underline, Undo2 } from "lucide-react";
+import { Bold, Bot, ChevronLeft, ChevronRight, Italic, Paintbrush, Redo2, Save, SkipForward, Type, Underline, Undo2 } from "lucide-react";
 import { createCanvasDocumentEditor, createEmptyKnowledgeDocumentSnapshot } from "./canvasEditorAdapter";
 import { AiAssistantPanel } from "../assistant/AiAssistantPanel";
 import { createKnowledgeDocumentBinding } from "../../domain/coreContracts";
@@ -314,6 +314,26 @@ export function KnowledgeDocumentWorkspace({
     setFormatBrush(nextBrush);
   }, []);
 
+  const preserveDocumentScroll = React.useCallback((action: () => void) => {
+    const mount = mountRef.current;
+    const scrollLeft = mount?.scrollLeft ?? 0;
+    const scrollTop = mount?.scrollTop ?? 0;
+    action();
+    if (!mount) return;
+
+    const restore = () => {
+      mount.scrollLeft = scrollLeft;
+      mount.scrollTop = scrollTop;
+      const nextState = readNativeScrollState(mount);
+      setDocumentViewportState((previousState) =>
+        areViewportScrollStatesEqual(previousState, nextState) ? previousState : nextState
+      );
+    };
+    restore();
+    window.requestAnimationFrame(restore);
+    window.setTimeout(restore, 0);
+  }, []);
+
   const applyFormatBrushToSelection = React.useCallback((brush: DocumentFormatBrushState) => {
     const editor = editorRef.current;
     if (!editor?.hasSelection()) {
@@ -321,11 +341,18 @@ export function KnowledgeDocumentWorkspace({
       return false;
     }
 
-    editor.applyFormat(brush.format, formatStateRef.current);
-    editor.focus();
+    let applied = false;
+    preserveDocumentScroll(() => {
+      applied = editor.applyFormat(brush.format);
+    });
+    if (!applied) {
+      setError(brush.reusable ? "连续格式刷已取样，请重新框选要套用格式的文字" : "单次格式刷已取样，请重新框选要套用格式的文字");
+      return false;
+    }
+
     setError("");
     return true;
-  }, []);
+  }, [preserveDocumentScroll]);
 
   const runFormatBrush = React.useCallback(
     (reusable: boolean) => {
@@ -340,7 +367,6 @@ export function KnowledgeDocumentWorkspace({
         if (!hasSelection) {
           setActiveFormatBrush(null);
           setError("");
-          editor.focus();
           return;
         }
 
@@ -353,16 +379,20 @@ export function KnowledgeDocumentWorkspace({
 
       if (!hasSelection) {
         setError(reusable ? "请先框选要复制格式的文字，再点击连续格式刷取样" : "请先框选要复制格式的文字，再点击单次格式刷取样");
-        editor.focus();
+        return;
+      }
+
+      const capturedFormat = editor.captureFormat();
+      if (!capturedFormat) {
+        setError("未读取到选区格式，请重新框选源文字");
         return;
       }
 
       setActiveFormatBrush({
-        format: { ...formatStateRef.current },
+        format: capturedFormat,
         reusable
       });
       setError("");
-      editor.focus();
     },
     [applyFormatBrushToSelection, canUseDocument, isEditorReady, setActiveFormatBrush]
   );
@@ -1083,21 +1113,23 @@ export function KnowledgeDocumentWorkspace({
           title={formatBrush && !formatBrush.reusable ? "单次格式刷已取样：框选目标文字后再次点击应用" : "单次格式刷：框选源文字后点击取样"}
           className={formatBrush && !formatBrush.reusable ? "format-button document-format-brush-button active" : "format-button document-format-brush-button"}
           aria-pressed={Boolean(formatBrush && !formatBrush.reusable)}
+          onMouseDown={(event) => event.preventDefault()}
           onClick={startSingleUseFormatBrush}
           disabled={!canUseDocument || !isEditorReady}
         >
           <Paintbrush size={15} />
         </button>
-        <span className="mindmap-toolbar-separator" />
         <button
           type="button"
           title={formatBrush?.reusable ? "连续格式刷已取样：框选目标文字后再次点击应用；无选区点击关闭" : "连续格式刷：框选源文字后点击取样"}
           className={formatBrush?.reusable ? "format-button document-format-brush-button active" : "format-button document-format-brush-button"}
           aria-pressed={Boolean(formatBrush?.reusable)}
+          onMouseDown={(event) => event.preventDefault()}
           onClick={toggleReusableFormatBrush}
           disabled={!canUseDocument || !isEditorReady}
         >
-          <Repeat2 size={15} />
+          <Paintbrush size={15} />
+          <span className="document-format-brush-infinity">∞</span>
         </button>
         <span className="mindmap-toolbar-spacer" />
         <div className="document-page-navigation" aria-label="文档翻页">

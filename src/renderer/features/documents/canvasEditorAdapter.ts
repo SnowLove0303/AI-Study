@@ -241,6 +241,27 @@ function toFormatState(payload: IRangeStyle): KnowledgeDocumentFormatState {
   };
 }
 
+function toFormatStateFromElement(element: IElement | IRangeStyle | null | undefined, fallback: KnowledgeDocumentFormatState): KnowledgeDocumentFormatState {
+  return {
+    fontSize: Number.isFinite(element?.size) ? Number(element?.size) : fallback.fontSize,
+    color: element?.color || fallback.color,
+    bold: element?.bold ?? fallback.bold,
+    italic: element?.italic ?? fallback.italic,
+    underline: element?.underline ?? fallback.underline
+  };
+}
+
+function applyFormatToElement(element: IElement, format: KnowledgeDocumentFormatState): IElement {
+  return {
+    ...element,
+    size: format.fontSize,
+    color: format.color,
+    bold: format.bold,
+    italic: format.italic,
+    underline: format.underline
+  };
+}
+
 function readEditorRangeText(editor: CanvasEditorInstance) {
   try {
     return editor.command.getRangeText().trim();
@@ -284,6 +305,35 @@ export async function createCanvasDocumentEditor(
 
   let lastSelectedText = "";
   let isNormalizingInputStyle = false;
+  let lastRange: CanvasRange | null = null;
+  let lastFormatState: KnowledgeDocumentFormatState = {
+    fontSize: DEFAULT_FONT_SIZE,
+    color: DEFAULT_COLOR,
+    bold: false,
+    italic: false,
+    underline: false
+  };
+  const isSelectedRange = (range: CanvasRange | null) => {
+    return Boolean(range && (range.startIndex !== range.endIndex || range.isCrossRowCol || range.tableId));
+  };
+  const rememberRange = () => {
+    try {
+      const range = editor.command.getRange();
+      if (isSelectedRange(range)) {
+        lastRange = range;
+      }
+      return range;
+    } catch {
+      return lastRange;
+    }
+  };
+  const readCurrentSelectionElementList = () => {
+    try {
+      return editor.command.getRangeContext()?.selectionElementList ?? [];
+    } catch {
+      return [];
+    }
+  };
   const rememberSelectedText = () => {
     const selectedText = readEditorRangeText(editor);
     if (selectedText) {
@@ -323,7 +373,9 @@ export async function createCanvasDocumentEditor(
     events.onSnapshotChanged?.(toSnapshot(editor));
   };
   editor.listener.rangeStyleChange = (payload) => {
-    events.onFormatChanged?.(toFormatState(payload));
+    lastFormatState = toFormatState(payload);
+    events.onFormatChanged?.(lastFormatState);
+    rememberRange();
     rememberSelectedText();
   };
   editor.register.contextMenuList([
@@ -340,7 +392,10 @@ export async function createCanvasDocumentEditor(
   return {
     getSnapshot: () => toSnapshot(editor),
     getSelectedText: () => rememberSelectedText() || lastSelectedText,
-    hasSelection: () => Boolean(readEditorRangeText(editor)),
+    hasSelection: () => {
+      rememberRange();
+      return Boolean(readEditorRangeText(editor) || readCurrentSelectionElementList().length > 0);
+    },
     exec: (command) => {
       if (command === "undo") editor.command.executeUndo();
       if (command === "redo") editor.command.executeRedo();
@@ -355,13 +410,25 @@ export async function createCanvasDocumentEditor(
     setColor: (color) => {
       editor.command.executeColor(color);
     },
-    applyFormat: (format, currentFormat) => {
-      editor.command.executeSize(format.fontSize);
-      editor.command.executeColor(format.color);
-      if (Boolean(currentFormat.bold) !== Boolean(format.bold)) editor.command.executeBold();
-      if (Boolean(currentFormat.italic) !== Boolean(format.italic)) editor.command.executeItalic();
-      if (Boolean(currentFormat.underline) !== Boolean(format.underline)) editor.command.executeUnderline();
+    captureFormat: () => {
+      rememberRange();
+      const selectedElements = readCurrentSelectionElementList();
+      const sourceElement = selectedElements.find(hasVisibleText) ?? selectedElements[0] ?? null;
+      if (!sourceElement && selectedElements.length === 0) return null;
+      return toFormatStateFromElement(sourceElement, lastFormatState);
+    },
+    applyFormat: (format) => {
+      rememberRange();
+      const selectedElements = readCurrentSelectionElementList();
+      if (selectedElements.length === 0) return false;
+
+      editor.command.executeInsertElementList(
+        selectedElements.map((element) => applyFormatToElement(element, format)),
+        { isReplace: true }
+      );
+      rememberRange();
       events.onSnapshotChanged?.(toSnapshot(editor));
+      return true;
     },
     focus: () => {
       editor.command.executeFocus();
