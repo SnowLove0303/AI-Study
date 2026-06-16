@@ -6,6 +6,7 @@ import { createKnowledgeDocumentBinding } from "../../domain/coreContracts";
 import { registerBeforeCloseSave } from "../../lib/saveDrain";
 import { readLocalSnapshot, writeLocalSnapshot } from "../../lib/localSnapshotStore";
 import {
+  areViewportScrollStatesEqual,
   EMPTY_VIEWPORT_SCROLL_STATE,
   ViewportScrollbars,
   type ViewportScrollAxis,
@@ -132,15 +133,6 @@ function readNativeScrollState(element: HTMLElement): ViewportScrollState {
       enabled: element.scrollWidth > element.clientWidth + 1
     }
   };
-}
-
-function areViewportScrollStatesEqual(left: ViewportScrollState, right: ViewportScrollState) {
-  return left.vertical.position === right.vertical.position &&
-    left.vertical.size === right.vertical.size &&
-    left.vertical.enabled === right.vertical.enabled &&
-    left.horizontal.position === right.horizontal.position &&
-    left.horizontal.size === right.horizontal.size &&
-    left.horizontal.enabled === right.horizontal.enabled;
 }
 
 function resetScrollTarget(element: HTMLElement | null | undefined) {

@@ -173,7 +173,18 @@ Word-like documents:
 
 ## Memory Policy
 
-Only mount active editors.
+Memory is allowed when it directly improves the two core work surfaces:
+mind-map editing and Word-style document editing. The constraint is not the
+absolute module size; the constraint is avoiding duplicated ownership,
+unbounded payload caches, and scattered one-off code paths.
+
+Keep active runtime state narrow:
+
+- mount only active editor instances
+- cache core editor modules once loaded
+- prewarm core editor modules during idle time when it improves first-use smoothness
+- do not preload all course snapshots, document snapshots, or binary assets
+- keep optional tooling and exports on demand unless repeated use proves otherwise
 
 When switching courses:
 

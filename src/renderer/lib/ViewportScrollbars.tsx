@@ -18,6 +18,15 @@ export const EMPTY_VIEWPORT_SCROLL_STATE: ViewportScrollState = {
   horizontal: { position: 0, size: 100, enabled: false }
 };
 
+export function areViewportScrollStatesEqual(left: ViewportScrollState, right: ViewportScrollState) {
+  return left.vertical.position === right.vertical.position &&
+    left.vertical.size === right.vertical.size &&
+    left.vertical.enabled === right.vertical.enabled &&
+    left.horizontal.position === right.horizontal.position &&
+    left.horizontal.size === right.horizontal.size &&
+    left.horizontal.enabled === right.horizontal.enabled;
+}
+
 type ViewportScrollbarsProps = {
   state: ViewportScrollState;
   className?: string;

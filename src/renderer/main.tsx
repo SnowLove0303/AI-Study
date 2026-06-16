@@ -28,6 +28,7 @@ import {
   type WorkspaceNodeSelectionRequest
 } from "./features/mindmap/MindMapWorkspace";
 import type { MindMapOutlineItem, MindMapSelectedNode } from "./features/mindmap/mindMapTypes";
+import { startCoreFeatureWarmup } from "./lib/performanceWarmup";
 import { drainBeforeCloseSaves } from "./lib/saveDrain";
 import "./styles.css";
 
@@ -397,6 +398,8 @@ function App() {
     return window.aistudyLifecycle?.onBeforeClose(() => drainBeforeCloseSaves());
   }, []);
 
+  React.useEffect(() => startCoreFeatureWarmup(), []);
+
   React.useEffect(() => {
     let isCancelled = false;
 
@@ -446,12 +449,16 @@ function App() {
 
   const activeCourse = courses.find((course) => course.id === activeCourseId) ?? null;
   const normalizedQuery = searchQuery.trim().toLowerCase();
-  const visibleCourses = normalizedQuery
-    ? courses.filter((course) => {
-        const haystack = `${course.name} ${course.description}`.toLowerCase();
-        return haystack.includes(normalizedQuery);
-      })
-    : courses;
+  const visibleCourses = React.useMemo(
+    () =>
+      normalizedQuery
+        ? courses.filter((course) => {
+            const haystack = `${course.name} ${course.description}`.toLowerCase();
+            return haystack.includes(normalizedQuery);
+          })
+        : courses,
+    [courses, normalizedQuery]
+  );
 
   function openCreateDialog() {
     setDialogMode("create");
@@ -474,7 +481,7 @@ function App() {
     setDraftDescription("");
   }
 
-  function saveCourse(event: React.FormEvent<HTMLFormElement>) {
+  const saveCourse: React.ComponentProps<"form">["onSubmit"] = (event) => {
     event.preventDefault();
     const name = draftName.trim();
     const description = draftDescription.trim();
@@ -510,7 +517,7 @@ function App() {
       );
       closeDialog();
     }
-  }
+  };
 
   function deleteCourse(course: Course) {
     const confirmed = window.confirm(`确定删除课程「${course.name}」吗？删除后该课程会从列表中移除。`);

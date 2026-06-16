@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  areViewportScrollStatesEqual,
   EMPTY_VIEWPORT_SCROLL_STATE,
   ViewportScrollbars,
   type ViewportScrollAxis,
@@ -50,6 +51,12 @@ export const MindMapCanvas = React.forwardRef<MindMapCanvasHandle, MindMapCanvas
     onError
   });
   const [viewportState, setViewportState] = React.useState<ViewportScrollState>(EMPTY_VIEWPORT_SCROLL_STATE);
+
+  const commitViewportState = React.useCallback((nextState: ViewportScrollState) => {
+    setViewportState((previousState) =>
+      areViewportScrollStatesEqual(previousState, nextState) ? previousState : nextState
+    );
+  }, []);
 
   React.useEffect(() => {
     eventsRef.current = {
@@ -119,7 +126,7 @@ export const MindMapCanvas = React.forwardRef<MindMapCanvasHandle, MindMapCanvas
         createSimpleMindMapEditor(editorSurface, latestSnapshotRef.current, {
           onSnapshotChanged: (nextSnapshot) => eventsRef.current.onSnapshotChanged(nextSnapshot),
           onNodeSelected: (node) => eventsRef.current.onNodeSelected(node),
-          onViewportChanged: setViewportState,
+          onViewportChanged: commitViewportState,
           onReady: () => {
             if (!isDisposed) eventsRef.current.onReadyChange(true);
           },
@@ -170,11 +177,11 @@ export const MindMapCanvas = React.forwardRef<MindMapCanvasHandle, MindMapCanvas
       resizeObserver.disconnect();
       editorRef.current?.destroy();
       editorRef.current = null;
-      setViewportState(EMPTY_VIEWPORT_SCROLL_STATE);
+      commitViewportState(EMPTY_VIEWPORT_SCROLL_STATE);
       mount.replaceChildren();
       eventsRef.current.onReadyChange(false);
     };
-  }, []);
+  }, [commitViewportState]);
 
   const handleViewportChange = React.useCallback((axis: ViewportScrollAxis, position: number) => {
     editorRef.current?.scrollViewport(axis, position);

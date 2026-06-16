@@ -24,15 +24,29 @@ type CanvasDocumentEvents = {
   onAskAi?: (selectedText: string) => void;
 };
 
-function loadCanvasEditor() {
-  if (import.meta.env.DEV) {
-    return import("@hufe921/canvas-editor");
-  }
+let canvasEditorModulePromise: Promise<CanvasEditorModule> | null = null;
 
-  const moduleUrl = import.meta.url;
-  const assetsIndex = moduleUrl.lastIndexOf("/assets/");
-  const vendorUrl = assetsIndex >= 0 ? `${moduleUrl.slice(0, assetsIndex)}/vendor/canvas-editor.js` : "./vendor/canvas-editor.js";
-  return import(/* @vite-ignore */ vendorUrl) as Promise<CanvasEditorModule>;
+function loadCanvasEditor() {
+  if (canvasEditorModulePromise) return canvasEditorModulePromise;
+
+  canvasEditorModulePromise = (import.meta.env.DEV
+    ? import("@hufe921/canvas-editor")
+    : (() => {
+        const moduleUrl = import.meta.url;
+        const assetsIndex = moduleUrl.lastIndexOf("/assets/");
+        const vendorUrl = assetsIndex >= 0 ? `${moduleUrl.slice(0, assetsIndex)}/vendor/canvas-editor.js` : "./vendor/canvas-editor.js";
+        return import(/* @vite-ignore */ vendorUrl) as Promise<CanvasEditorModule>;
+      })()
+  ).catch((error) => {
+    canvasEditorModulePromise = null;
+    throw error;
+  });
+
+  return canvasEditorModulePromise;
+}
+
+export async function preloadCanvasDocumentEditor() {
+  await loadCanvasEditor();
 }
 
 function normalizeElementList(value: unknown): IElement[] {

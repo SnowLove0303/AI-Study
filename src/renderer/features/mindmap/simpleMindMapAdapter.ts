@@ -1,5 +1,4 @@
 import {
-  countNodes,
   createXMindStyleThemeConfig,
   extractNodeId,
   extractNodeTitle,
@@ -41,8 +40,20 @@ const INITIAL_VIEW_SCALE = 1;
 
 let pluginsRegistered = false;
 let xmindExportPluginPromise: Promise<SimpleMindMapPlugin> | null = null;
+let simpleMindMapConstructorPromise: Promise<SimpleMindMapConstructor> | null = null;
 
 async function loadSimpleMindMap() {
+  if (simpleMindMapConstructorPromise) return simpleMindMapConstructorPromise;
+
+  simpleMindMapConstructorPromise = loadSimpleMindMapModules().catch((error) => {
+    simpleMindMapConstructorPromise = null;
+    throw error;
+  });
+
+  return simpleMindMapConstructorPromise;
+}
+
+async function loadSimpleMindMapModules() {
   const [
     { default: MindMap },
     { default: Drag },
@@ -75,6 +86,10 @@ async function loadSimpleMindMap() {
   }
 
   return MindMap as SimpleMindMapConstructor;
+}
+
+export async function preloadSimpleMindMapEditor() {
+  await loadSimpleMindMap();
 }
 
 async function ensureXMindExportPlugin(editor: any) {
@@ -440,20 +455,24 @@ function clampPercent(value: number, min = 0, max = 100) {
   return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
 }
 
+function roundViewportPercent(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
 function normalizeViewportState(data: unknown): MindMapViewportState {
   const vertical = (data as { vertical?: { top?: unknown; height?: unknown } } | null)?.vertical;
   const horizontal = (data as { horizontal?: { left?: unknown; width?: unknown } } | null)?.horizontal;
-  const verticalSize = clampPercent(Number(vertical?.height ?? 100));
-  const horizontalSize = clampPercent(Number(horizontal?.width ?? 100));
+  const verticalSize = roundViewportPercent(clampPercent(Number(vertical?.height ?? 100)));
+  const horizontalSize = roundViewportPercent(clampPercent(Number(horizontal?.width ?? 100)));
 
   return {
     vertical: {
-      position: clampPercent(Number(vertical?.top ?? 0), 0, Math.max(0, 100 - verticalSize)),
+      position: roundViewportPercent(clampPercent(Number(vertical?.top ?? 0), 0, Math.max(0, 100 - verticalSize))),
       size: verticalSize,
       enabled: verticalSize < 99.5
     },
     horizontal: {
-      position: clampPercent(Number(horizontal?.left ?? 0), 0, Math.max(0, 100 - horizontalSize)),
+      position: roundViewportPercent(clampPercent(Number(horizontal?.left ?? 0), 0, Math.max(0, 100 - horizontalSize))),
       size: horizontalSize,
       enabled: horizontalSize < 99.5
     }
@@ -506,7 +525,6 @@ export async function createSimpleMindMapEditor(
   options: MindMapEditorOptions = {}
 ): Promise<MindMapEditorHandle> {
   const MindMap = await loadSimpleMindMap();
-  const nodeCount = countNodes(snapshot.root);
   const layout = normalizeLayout(snapshot.layout);
   const isCanvasDragEnabled = options.canvasDragEnabled === true;
   const editor = new MindMap({
@@ -520,7 +538,12 @@ export async function createSimpleMindMapEditor(
     enableShortcutOnlyWhenMouseInSvg: true,
     isDisableDrag: !isCanvasDragEnabled,
     useLeftKeySelectionRightKeyDrag: !isCanvasDragEnabled,
-    openPerformance: nodeCount >= 200,
+    openPerformance: false,
+    performanceConfig: {
+      time: 0,
+      padding: 0,
+      removeNodeWhenOutCanvas: false
+    },
     maxHistoryCount: 40,
     textAutoWrapWidth: DEFAULT_NODE_TEXT_WRAP_WIDTH,
     minNodeTextModifyWidth: MIN_NODE_TEXT_WRAP_WIDTH,
@@ -719,7 +742,6 @@ export async function createSimpleMindMapEditor(
       const maxPosition = Math.max(0, 100 - axisState.size);
       const wrapSize = axis === "vertical" ? viewportControlSize.height : viewportControlSize.width;
       editor.scrollbar?.updateMindMapView?.(axis, (clampPercent(position, 0, maxPosition) / 100) * wrapSize);
-      scheduleViewportSync();
     },
     destroy: () => {
       if (destroyed) return;
