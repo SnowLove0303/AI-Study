@@ -464,11 +464,11 @@ export function MindMapWorkspace({
     setFocusedNodeId(null);
     setIsReady(false);
     setSavedAt(null);
+    setSnapshot(null);
+    setMapId(null);
+    setStorageMode("none");
 
     if (!courseId) {
-      setSnapshot(null);
-      setMapId(null);
-      setStorageMode("none");
       setError("");
       setIsLoading(false);
       return;
