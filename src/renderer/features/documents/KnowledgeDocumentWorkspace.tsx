@@ -862,6 +862,39 @@ export function KnowledgeDocumentWorkspace({
     });
   }, [readSelectedText]);
 
+  React.useEffect(() => {
+    const handleCanvasEditorAskAiMenu = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const menuItem = target?.closest(".ce-contextmenu-item");
+      const host = mountRef.current;
+      if (!target || !menuItem || !host?.contains(menuItem)) return;
+
+      const menuText = menuItem.textContent?.replace(/\s+/g, "") ?? "";
+      if (!menuText.includes("问AI")) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const selectedText = readSelectedText().trim() || lastSelectedTextRef.current;
+      if (selectedText) {
+        lastSelectedTextRef.current = selectedText;
+      }
+      host.querySelectorAll(".ce-contextmenu-container").forEach((menu) => menu.remove());
+
+      setAssistantAutoSubmit(Boolean(selectedText));
+      setAssistantDraft(selectedText);
+      setAiContextMenu({
+        ...clampAiPanelPoint(getAiPanelAnchorPoint(toolbarAiButtonRef.current, latestContextMenuPointRef.current)),
+        text: selectedText
+      });
+    };
+
+    document.addEventListener("mousedown", handleCanvasEditorAskAiMenu, true);
+    return () => {
+      document.removeEventListener("mousedown", handleCanvasEditorAskAiMenu, true);
+    };
+  }, [readSelectedText]);
+
   const rememberContextMenuPoint = React.useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     latestContextMenuPointRef.current = {
       x: event.clientX,
