@@ -272,7 +272,6 @@ export function KnowledgeDocumentWorkspace({
   const [documentViewportState, setDocumentViewportState] =
     React.useState<ViewportScrollState>(EMPTY_VIEWPORT_SCROLL_STATE);
   const [assistantDraft, setAssistantDraft] = React.useState("");
-  const [assistantAutoSubmit, setAssistantAutoSubmit] = React.useState(false);
   const [aiContextMenu, setAiContextMenu] = React.useState<AiContextMenuState | null>(null);
   const [skipBlankPages, setSkipBlankPages] = React.useState(false);
   const [isNavigatingDocument, setIsNavigatingDocument] = React.useState(false);
@@ -615,7 +614,6 @@ export function KnowledgeDocumentWorkspace({
             }
             const point = getAiPanelAnchorPoint(toolbarAiButtonRef.current, latestContextMenuPointRef.current);
             ignoreNextAiOutsideClickRef.current = aiContextMenuOpenRef.current;
-            setAssistantAutoSubmit(Boolean(assistantText));
             setAssistantDraft(assistantText);
             setAiContextMenu({
               ...clampAiPanelPoint(point),
@@ -854,7 +852,6 @@ export function KnowledgeDocumentWorkspace({
     if (selectedText) {
       lastSelectedTextRef.current = selectedText;
     }
-    setAssistantAutoSubmit(false);
     setAssistantDraft(selectedText);
     setAiContextMenu({
       ...clampAiPanelPoint(point),
@@ -881,7 +878,6 @@ export function KnowledgeDocumentWorkspace({
       }
       host.querySelectorAll(".ce-contextmenu-container").forEach((menu) => menu.remove());
 
-      setAssistantAutoSubmit(Boolean(selectedText));
       setAssistantDraft(selectedText);
       setAiContextMenu({
         ...clampAiPanelPoint(getAiPanelAnchorPoint(toolbarAiButtonRef.current, latestContextMenuPointRef.current)),
@@ -1079,10 +1075,8 @@ export function KnowledgeDocumentWorkspace({
             compact
             title="文档 AI 助手"
             initialInput={assistantDraft}
-            autoSubmitInitialInput={assistantAutoSubmit}
             onInitialInputConsumed={() => {
               setAssistantDraft("");
-              setAssistantAutoSubmit(false);
             }}
             onClose={() => setAiContextMenu(null)}
           />

@@ -23,7 +23,6 @@ type AiAssistantPanelProps = {
   contextText?: string;
   compact?: boolean;
   initialInput?: string;
-  autoSubmitInitialInput?: boolean;
   onInitialInputConsumed?: () => void;
   onClose?: () => void;
   title?: string;
@@ -57,7 +56,6 @@ export function AiAssistantPanel({
   nodeTitle = "",
   compact = false,
   initialInput = "",
-  autoSubmitInitialInput = false,
   onInitialInputConsumed,
   onClose,
   title,
@@ -133,18 +131,12 @@ export function AiAssistantPanel({
     if (!selectedText) return;
 
     onInitialInputConsumed?.();
-    if (autoSubmitInitialInput) {
-      setInput("");
-      void sendPrompt(selectedText);
-      return;
-    }
-
     setInput((current) => {
       const currentText = current.trim();
       return currentText ? `${selectedText}\n\n${currentText}` : selectedText;
     });
     window.setTimeout(() => textareaRef.current?.focus(), 0);
-  }, [autoSubmitInitialInput, initialInput, onInitialInputConsumed, sendPrompt]);
+  }, [initialInput, onInitialInputConsumed]);
 
   const sendMessage = React.useCallback(async (event?: React.FormEvent<HTMLFormElement>) => {
     event?.preventDefault();
