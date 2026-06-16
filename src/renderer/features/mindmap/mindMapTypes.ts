@@ -60,7 +60,7 @@ export type MindMapCommand =
 export type MindMapTextFormat = {
   fontWeight?: "normal" | "bold";
   fontStyle?: "normal" | "italic";
-  textDecoration?: "none" | "underline";
+  textDecoration?: "none" | "underline" | "line-through";
   color?: string;
   fontSize?: number;
   textAutoWrapWidth?: number;

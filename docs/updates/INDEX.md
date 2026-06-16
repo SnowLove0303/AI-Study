@@ -4,18 +4,51 @@
 
 ## 最新版本
 
-- 版本号：0.1.0
-- 更新时间：2026-06-16 03:57:20
-- 功能更新：涓€閿墦鍖呯敓鎴愬畨瑁呭寘
+- 版本号：0.1.2
+- 更新时间：2026-06-16 19:47:57
+- 功能更新：收尾需求文档五项问题；修复文档 AI 入口响应；稳定导图文本编辑实时重排与目录默认折叠
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：feature/core-logic-freeze-20260616
-- 提交：0d4aa773
+- 提交：aee6dd20
 
 ## 更新记录
 
+### 0.1.2 - 2026-06-16 19:47:57
+
+- 收尾需求文档五项问题
+- 修复文档 AI 入口响应
+- 稳定导图文本编辑实时重排与目录默认折叠
+- GitHub：https://github.com/SnowLove0303/AI-Study.git
+- 分支：feature/core-logic-freeze-20260616
+- 提交：aee6dd20
+
+
+### 0.1.2 - 2026-06-16 17:46:48
+
+- 收尾需求文档五项问题
+- 修复文档 AI 入口响应
+- 稳定导图文本编辑实时重排与目录默认折叠
+- 为思维导图文本格式新增删除线能力
+- GitHub：https://github.com/SnowLove0303/AI-Study.git
+- 分支：feature/core-logic-freeze-20260616
+- 提交：aee6dd20
+
+
+### 0.1.1 - 2026-06-16 16:32:01
+
+- 修复更新管理仓库源与版本号同步
+- 应用启动时预热 MySQL 连接
+- AI 助手消息改为原文透传并优化发送按钮识别
+- 思维导图目录默认折叠子级
+- 稳定导图节点编辑框样式与换行表现
+- GitHub：https://github.com/SnowLove0303/AI-Study.git
+- 分支：feature/core-logic-freeze-20260616
+- 提交：aee6dd20
+
+
 ### 0.1.0 - 2026-06-16 03:57:20
 
-- 涓€閿墦鍖呯敓鎴愬畨瑁呭寘
+- 一键打包生成安装包
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：feature/core-logic-freeze-20260616
 - 提交：0d4aa773
@@ -101,7 +134,7 @@
 
 ### 0.1.0 - 2026-06-16 03:01:15
 
-- 涓€閿墦鍖呯敓鎴愬畨瑁呭寘
+- 一键打包生成安装包
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：main
 - 提交：961f0a35
@@ -119,7 +152,7 @@
 
 ### 0.1.0 - 2026-06-16 00:59:59
 
-- 涓€閿墦鍖呯敓鎴愬畨瑁呭寘
+- 一键打包生成安装包
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：main
 - 提交：961f0a35
@@ -127,7 +160,7 @@
 
 ### 0.1.0 - 2026-06-16 00:51:23
 
-- 涓€閿墦鍖呯敓鎴愬畨瑁呭寘
+- 一键打包生成安装包
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：main
 - 提交：961f0a35
@@ -135,7 +168,7 @@
 
 ### 0.1.0 - 2026-06-16 00:48:36
 
-- 涓€閿墦鍖呯敓鎴愬畨瑁呭寘
+- 一键打包生成安装包
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：main
 - 提交：961f0a35
@@ -153,7 +186,7 @@
 
 ### 0.1.0 - 2026-06-16 00:32:59
 
-- 涓€閿墦鍖呯敓鎴愬畨瑁呭寘
+- 一键打包生成安装包
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：main
 - 提交：961f0a35
@@ -161,7 +194,7 @@
 
 ### 0.1.0 - 2026-06-16 00:26:50
 
-- 涓€閿墦鍖呯敓鎴愬畨瑁呭寘
+- 一键打包生成安装包
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：main
 - 提交：961f0a35
@@ -169,7 +202,7 @@
 
 ### 0.1.0 - 2026-06-16 00:20:47
 
-- 涓€閿墦鍖呯敓鎴愬畨瑁呭寘
+- 一键打包生成安装包
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：main
 - 提交：961f0a35
@@ -225,7 +258,7 @@
 
 ### 0.1.0 - 2026-06-15 22:58:40
 
-- 涓€閿墦鍖呯敓鎴愬畨瑁呭寘
+- 一键打包生成安装包
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：main
 - 提交：961f0a35
@@ -233,7 +266,7 @@
 
 ### 0.1.0 - 2026-06-15 22:56:40
 
-- 涓€閿墦鍖呯敓鎴愬畨瑁呭寘
+- 一键打包生成安装包
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：main
 - 提交：961f0a35
@@ -241,7 +274,7 @@
 
 ### 0.1.0 - 2026-06-15 22:52:12
 
-- 涓€閿墦鍖呯敓鎴愬畨瑁呭寘
+- 一键打包生成安装包
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：main
 - 提交：961f0a35
@@ -258,7 +291,7 @@
 
 ### 0.1.0 - 2026-06-15 22:25:18
 
-- 涓€閿墦鍖呯敓鎴愬畨瑁呭寘
+- 一键打包生成安装包
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：main
 - 提交：961f0a35
@@ -266,7 +299,7 @@
 
 ### 0.1.0 - 2026-06-15 22:18:05
 
-- 涓€閿墦鍖呯敓鎴愬畨瑁呭寘
+- 一键打包生成安装包
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：main
 - 提交：961f0a35

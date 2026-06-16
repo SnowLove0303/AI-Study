@@ -4,6 +4,12 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectRoot = Resolve-Path (Join-Path $scriptDir "..\..")
 $releaseRoot = Join-Path $projectRoot "release"
 $releasePrefix = (Join-Path $projectRoot "release-").ToLowerInvariant()
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $OutputEncoding
+try {
+  & chcp.com 65001 | Out-Null
+} catch {
+}
 
 function Remove-BuildArtifact {
   param([string] $Path)
@@ -51,6 +57,8 @@ function Test-IsProjectBuildProcess {
 }
 
 Set-Location $projectRoot
+$packageJson = Get-Content -LiteralPath (Join-Path $projectRoot "package.json") -Raw | ConvertFrom-Json
+$appVersion = [string] $packageJson.version
 
 Write-Host "[AIstudy] Closing old packaged app instances..."
 $oldProcesses = Get-Process -Name "AIstudy" -ErrorAction SilentlyContinue | Where-Object { Test-IsProjectBuildProcess $_ }
@@ -71,7 +79,7 @@ if ($oldProcesses) {
 
 Write-Host "[AIstudy] Cleaning stale packaging artifacts..."
 Remove-BuildArtifact (Join-Path $releaseRoot "win-unpacked")
-Remove-BuildArtifact (Join-Path $releaseRoot "aistudy-0.1.0-x64.nsis.7z")
+Remove-BuildArtifact (Join-Path $releaseRoot ("aistudy-{0}-x64.nsis.7z" -f $appVersion))
 
 if ([string]::IsNullOrWhiteSpace($env:AISTUDY_UPDATE_SUMMARY)) {
   $env:AISTUDY_UPDATE_SUMMARY = "一键打包生成安装包"
@@ -105,4 +113,4 @@ if ($exitCode -ne 0) {
   }
 }
 
-Write-Host "[AIstudy] Done: release\AIstudy-Setup-0.1.0.exe"
+Write-Host ("[AIstudy] Done: release\AIstudy-Setup-{0}.exe" -f $appVersion)

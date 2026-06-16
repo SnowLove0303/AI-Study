@@ -1,4 +1,4 @@
-import { Bold, Italic, Palette, RotateCcw, Underline } from "lucide-react";
+import { Bold, Italic, Palette, RotateCcw, Strikethrough, Underline } from "lucide-react";
 import { MIND_MAP_DEFAULT_FONT_SIZE } from "./mindMapSnapshot";
 import type { MindMapTextFormat, MindMapTextFormatPatch } from "./mindMapTypes";
 
@@ -35,6 +35,7 @@ export function MindMapTextFormatToolbar({ value, disabled, onChange }: MindMapT
   const isBold = value?.fontWeight === "bold";
   const isItalic = value?.fontStyle === "italic";
   const isUnderline = value?.textDecoration === "underline";
+  const isStrike = value?.textDecoration === "line-through";
   const color = normalizeColor(value?.color);
   const fontSize = normalizeFontSize(value?.fontSize);
   const nodeWidth = normalizeNodeWidth(value?.textAutoWrapWidth);
@@ -78,6 +79,17 @@ export function MindMapTextFormatToolbar({ value, disabled, onChange }: MindMapT
         disabled={disabled}
       >
         <Underline size={15} />
+      </button>
+      <button
+        className={isStrike ? "format-button active" : "format-button"}
+        type="button"
+        title="删除线"
+        aria-label="删除线"
+        aria-pressed={isStrike}
+        onClick={() => onChange({ textDecoration: isStrike ? "none" : "line-through" })}
+        disabled={disabled}
+      >
+        <Strikethrough size={15} />
       </button>
       <select
         className="mindmap-format-size"

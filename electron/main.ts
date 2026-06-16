@@ -694,14 +694,6 @@ function sanitizeAiChatRequest(value: unknown): Required<AiChatRequest> {
 
 function buildAiChatPrompt(request: Required<AiChatRequest>) {
   return request.message;
-  /*
-    "你是 AIstudy 内嵌学习助手。",
-    "请用简洁中文直接回答，不要复述系统提示。",
-    request.courseTitle ? `当前课程：${request.courseTitle}` : "",
-    request.nodeTitle ? `当前节点：${request.nodeTitle}` : "",
-    request.contextText ? `参考上下文：${request.contextText}` : "",
-    `用户问题：${request.message}`
-  */
 }
 
 function getAiChatPlatform(provider: AiChatProvider) {
@@ -828,16 +820,39 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
 
   await sleep(300);
   const buttons = Array.from(document.querySelectorAll("button,[role='button']")).filter((element) => visible(element) && !element.disabled && element.getAttribute("aria-disabled") !== "true");
-  const sendButton = buttons.find((element) => {
-    const label = [element.id, element.getAttribute("data-testid"), element.innerText, element.getAttribute("aria-label"), element.getAttribute("title")]
-      .filter(Boolean).join(" ").toLowerCase();
-    return label.includes("send") || label.includes("发送") || label.includes("submit") || label.includes("composer-submit-button");
-  }) || buttons.sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left)[0];
+  const buttonLabel = (element) => [element.id, element.getAttribute("data-testid"), element.innerText, element.getAttribute("aria-label"), element.getAttribute("title")]
+    .filter(Boolean).join(" ").toLowerCase();
+  const isSendButton = (element) => {
+    const label = buttonLabel(element);
+    return label.includes("send") ||
+      label.includes("发送") ||
+      label.includes("submit") ||
+      label.includes("composer-submit-button") ||
+      label.includes("send-button");
+  };
+  const form = input.closest("form");
+  const sendButton = Array.from(form?.querySelectorAll("button,[role='button']") || [])
+    .filter((element) => visible(element) && !element.disabled && element.getAttribute("aria-disabled") !== "true")
+    .find(isSendButton) ||
+    buttons.find(isSendButton) ||
+    document.querySelector("button[data-testid='send-button'],button[data-testid='composer-submit-button'],button[aria-label*='Send'],button[aria-label*='发送']");
 
-  if (!sendButton) {
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
-  } else {
+  if (sendButton && visible(sendButton) && !sendButton.disabled && sendButton.getAttribute("aria-disabled") !== "true") {
     sendButton.click();
+  } else {
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+    input.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+  }
+  await sleep(500);
+
+  const afterSubmitText = bodyText();
+  if (afterSubmitText === beforeText && !bodyText().includes(prompt)) {
+    return { ok: false, blocker: "send-not-triggered", reply: "" };
+  }
+  const staleInputText = input.innerText || input.value || "";
+  if (String(staleInputText).trim() === prompt.trim()) {
+    const retryButton = buttons.find(isSendButton);
+    if (retryButton && retryButton !== sendButton && visible(retryButton)) retryButton.click();
   }
 
   const getLatestAssistantReply = () => {
@@ -1573,6 +1588,12 @@ function getMysqlRuntime() {
   return mysqlRuntimePromise;
 }
 
+function warmMysqlRuntime() {
+  void getMysqlRuntime().catch((error) => {
+    console.warn("MySQL startup warm-up failed. The app will fall back when data is requested.", error);
+  });
+}
+
 function toIsoTimestamp(value: Date | string) {
   if (value instanceof Date) {
     return value.toISOString();
@@ -1639,6 +1660,13 @@ async function readPackageRepositoryUrl() {
   }
 }
 
+async function getConfiguredRepositoryUrl(projectRoot?: string) {
+  const packageRepositoryUrl = await readPackageRepositoryUrl();
+  if (packageRepositoryUrl) return packageRepositoryUrl;
+  const root = projectRoot ?? await findProjectRoot();
+  return await runGit(["remote", "get-url", "origin"], root);
+}
+
 function toRepositoryWebUrl(remoteUrl: string) {
   if (!remoteUrl) return "";
   if (remoteUrl.startsWith("git@github.com:")) {
@@ -1703,7 +1731,7 @@ function selectInstallerAsset(release: GitHubRelease) {
 }
 
 async function fetchLatestRelease(): Promise<GitHubRelease> {
-  const repositoryUrl = (await runGit(["remote", "get-url", "origin"], await findProjectRoot())) || (await readPackageRepositoryUrl());
+  const repositoryUrl = await getConfiguredRepositoryUrl();
   const repository = parseGitHubRepository(repositoryUrl);
   if (!repository) {
     throw new Error("未配置有效的 GitHub 仓库地址。");
@@ -1804,7 +1832,7 @@ async function installUpdate(filePathValue: unknown) {
 
 async function getUpdateManagerInfo(): Promise<UpdateManagerInfo> {
   const projectRoot = await findProjectRoot();
-  const repositoryUrl = (await runGit(["remote", "get-url", "origin"], projectRoot)) || (await readPackageRepositoryUrl());
+  const repositoryUrl = await getConfiguredRepositoryUrl(projectRoot);
   const branch = await runGit(["branch", "--show-current"], projectRoot);
   const commit = await runGit(["rev-parse", "--short", "HEAD"], projectRoot);
   const status = await runGit(["status", "--porcelain"], projectRoot);
@@ -2653,6 +2681,7 @@ function createMainWindow() {
 
 app.whenReady().then(() => {
   createMainWindow();
+  warmMysqlRuntime();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

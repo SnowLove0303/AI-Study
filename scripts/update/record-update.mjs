@@ -96,10 +96,13 @@ ensureUpdateDirectory();
 
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
 const version = String(packageJson.version || "0.0.0");
+const configuredRepository = typeof packageJson.repository === "string"
+  ? packageJson.repository
+  : packageJson.repository?.url || "";
 const updatedAt = formatDate(new Date());
 const summary = normalizeSummary(process.argv.slice(2));
 const summaryItems = splitSummary(summary);
-const remote = runGit(["remote", "get-url", "origin"]);
+const remote = configuredRepository || runGit(["remote", "get-url", "origin"]);
 const branch = runGit(["branch", "--show-current"]);
 const commit = runGit(["rev-parse", "--short", "HEAD"]);
 

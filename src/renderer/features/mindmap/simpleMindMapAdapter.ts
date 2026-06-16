@@ -314,7 +314,7 @@ function normalizeTextFormat(node: any): MindMapTextFormat {
   return {
     fontWeight: fontWeight === "bold" ? "bold" : "normal",
     fontStyle: fontStyle === "italic" ? "italic" : "normal",
-    textDecoration: textDecoration === "underline" ? "underline" : "none",
+    textDecoration: textDecoration === "underline" || textDecoration === "line-through" ? textDecoration : "none",
     color: typeof color === "string" && color ? color : "#17466f",
     fontSize: Number.isFinite(fontSize) && fontSize > 0 ? fontSize : MIND_MAP_DEFAULT_FONT_SIZE,
     textAutoWrapWidth: customTextWidth
@@ -343,7 +343,7 @@ function normalizeTextFormatPatch(patch: MindMapTextFormatPatch) {
     next.fontStyle = patch.fontStyle === "italic" ? "italic" : "normal";
   }
   if (hasPatchKey(patch, "textDecoration")) {
-    next.textDecoration = patch.textDecoration === "underline" ? "underline" : "none";
+    next.textDecoration = patch.textDecoration === "underline" || patch.textDecoration === "line-through" ? patch.textDecoration : "none";
   }
   if (hasPatchKey(patch, "color")) {
     next.color = typeof patch.color === "string" && /^#[0-9a-f]{6}$/i.test(patch.color) ? patch.color : "#17466f";
@@ -548,7 +548,7 @@ export async function createSimpleMindMapEditor(
     textAutoWrapWidth: DEFAULT_NODE_TEXT_WRAP_WIDTH,
     minNodeTextModifyWidth: MIN_NODE_TEXT_WRAP_WIDTH,
     maxNodeTextModifyWidth: MAX_NODE_TEXT_WRAP_WIDTH,
-    openRealtimeRenderOnNodeTextEdit: false,
+    openRealtimeRenderOnNodeTextEdit: true,
     isLimitMindMapInCanvas: false,
     isLimitMindMapInCanvasWhenHasScrollbar: false,
     enableFreeDrag: true,

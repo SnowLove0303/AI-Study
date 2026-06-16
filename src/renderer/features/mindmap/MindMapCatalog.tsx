@@ -26,6 +26,14 @@ function collectCollapsiblePaths(items: MindMapOutlineItem[], paths = new Set<st
   return paths;
 }
 
+function collectDefaultCollapsedPaths(items: MindMapOutlineItem[]) {
+  const paths = new Set<string>();
+  items.forEach((item) => {
+    collectCollapsiblePaths(item.children, paths);
+  });
+  return paths;
+}
+
 function renderCatalogItems(items: MindMapOutlineItem[], options: CatalogRenderOptions) {
   return (
     <ol className="catalog-tree">
@@ -84,19 +92,34 @@ function renderCatalogItems(items: MindMapOutlineItem[], options: CatalogRenderO
 }
 
 export function MindMapCatalog({ items, selectedNodeId, resetKey, onNodeSelect }: MindMapCatalogProps) {
-  const [collapsedPaths, setCollapsedPaths] = React.useState<Set<string>>(() => new Set());
+  const [collapsedPaths, setCollapsedPaths] = React.useState<Set<string>>(() => collectDefaultCollapsedPaths(items));
+  const knownCollapsiblePathsRef = React.useRef<Set<string>>(collectCollapsiblePaths(items));
 
   React.useEffect(() => {
-    setCollapsedPaths(new Set());
+    const validPaths = collectCollapsiblePaths(items);
+    knownCollapsiblePathsRef.current = validPaths;
+    setCollapsedPaths(collectDefaultCollapsedPaths(items));
   }, [resetKey]);
 
   React.useEffect(() => {
+    const validPaths = collectCollapsiblePaths(items);
+    const knownPaths = knownCollapsiblePathsRef.current;
     setCollapsedPaths((current) => {
-      if (current.size === 0) return current;
-      const validPaths = collectCollapsiblePaths(items);
       const next = new Set([...current].filter((path) => validPaths.has(path)));
-      return next.size === current.size ? current : next;
+      validPaths.forEach((path) => {
+        if (!knownPaths.has(path)) {
+          next.add(path);
+        }
+      });
+      if (
+        next.size === current.size &&
+        [...next].every((path) => current.has(path))
+      ) {
+        return current;
+      }
+      return next;
     });
+    knownCollapsiblePathsRef.current = validPaths;
   }, [items]);
 
   const togglePath = React.useCallback((path: string) => {

@@ -229,6 +229,7 @@ export function KnowledgeDocumentWorkspace({
 }: KnowledgeDocumentWorkspaceProps) {
   const mountRef = React.useRef<HTMLDivElement | null>(null);
   const toolbarAiButtonRef = React.useRef<HTMLButtonElement | null>(null);
+  const aiPanelRef = React.useRef<HTMLDivElement | null>(null);
   const latestContextMenuPointRef = React.useRef({ x: 0, y: 0 });
   const editorRef = React.useRef<KnowledgeDocumentEditorHandle | null>(null);
   const saveTimerRef = React.useRef<number | null>(null);
@@ -819,6 +820,13 @@ export function KnowledgeDocumentWorkspace({
     if (!aiContextMenu) return undefined;
     const closeMenu = (event: MouseEvent) => {
       if (event.defaultPrevented) return;
+      const target = event.target instanceof Node ? event.target : null;
+      if (
+        target &&
+        (aiPanelRef.current?.contains(target) || toolbarAiButtonRef.current?.contains(target))
+      ) {
+        return;
+      }
       setAiContextMenu(null);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -935,7 +943,8 @@ export function KnowledgeDocumentWorkspace({
           title="AI 助手"
           ref={toolbarAiButtonRef}
           className={aiContextMenu ? "document-ai-toolbar-button active" : "document-ai-toolbar-button"}
-          onClick={() => {
+          onClick={(event) => {
+            event.stopPropagation();
             const rect = toolbarAiButtonRef.current?.getBoundingClientRect();
             openAssistantPanel({
               x: rect ? rect.left : window.innerWidth - 460,
@@ -967,6 +976,7 @@ export function KnowledgeDocumentWorkspace({
 
       {aiContextMenu ? (
         <div
+          ref={aiPanelRef}
           className="document-ai-context-menu is-chat"
           style={{ left: aiContextMenu.x, top: aiContextMenu.y }}
           role="dialog"
