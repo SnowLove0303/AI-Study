@@ -2125,6 +2125,11 @@ h3 {
   min-width: 0;
 }
 
+.assistant-title-block.draggable {
+  cursor: move;
+  user-select: none;
+}
+
 .assistant-title-block h1 {
   overflow: hidden;
   text-overflow: ellipsis;

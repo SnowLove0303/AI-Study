@@ -1,5 +1,5 @@
 import React from "react";
-import { Bot, CheckCircle2, Loader2, Send, Sparkles, X } from "lucide-react";
+import { Bot, CheckCircle2, Loader2, Send, Sparkles, Trash2, X } from "lucide-react";
 
 type AiChatProvider = "doubao" | "chatgpt";
 
@@ -23,6 +23,8 @@ type AiAssistantPanelProps = {
   contextText?: string;
   compact?: boolean;
   initialInput?: string;
+  storageKey?: string;
+  onDragHandlePointerDown?: (event: React.PointerEvent<HTMLDivElement>) => void;
   onInitialInputConsumed?: () => void;
   onClose?: () => void;
   title?: string;
@@ -51,25 +53,80 @@ function getProviderName(provider: AiChatProvider) {
   return provider === "chatgpt" ? "ChatGPT" : "豆包";
 }
 
+const DEFAULT_ASSISTANT_MESSAGES: AiChatMessage[] = [
+  {
+    id: "welcome",
+    role: "assistant",
+    content: "我会复用端口管理中已登录的豆包或 ChatGPT 页面来回答问题。"
+  }
+];
+const ASSISTANT_STORAGE_PREFIX = "aistudy:assistant-chat:v1:";
+const MAX_PERSISTED_MESSAGES = 80;
+const MAX_PERSISTED_MESSAGE_CHARS = 8000;
+
+type StoredAssistantSession = {
+  version: 1;
+  provider?: AiChatProvider;
+  input?: string;
+  messages?: AiChatMessage[];
+};
+
+function trimStoredMessage(message: AiChatMessage): AiChatMessage {
+  return {
+    ...message,
+    content: message.content.slice(0, MAX_PERSISTED_MESSAGE_CHARS)
+  };
+}
+
+function readStoredSession(storageKey: string): StoredAssistantSession | null {
+  try {
+    const raw = localStorage.getItem(`${ASSISTANT_STORAGE_PREFIX}${storageKey}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredAssistantSession;
+    if (parsed?.version !== 1) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredSession(storageKey: string, session: StoredAssistantSession) {
+  try {
+    localStorage.setItem(`${ASSISTANT_STORAGE_PREFIX}${storageKey}`, JSON.stringify(session));
+  } catch {
+    // Chat persistence is a convenience layer; storage pressure should not block asking AI.
+  }
+}
+
+function clearStoredSession(storageKey: string) {
+  try {
+    localStorage.removeItem(`${ASSISTANT_STORAGE_PREFIX}${storageKey}`);
+  } catch {
+    // Ignore storage cleanup failures.
+  }
+}
+
 export function AiAssistantPanel({
   courseTitle = "",
   nodeTitle = "",
   compact = false,
   initialInput = "",
+  storageKey = "global",
+  onDragHandlePointerDown,
   onInitialInputConsumed,
   onClose,
   title,
   showContext
 }: AiAssistantPanelProps) {
-  const [provider, setProvider] = React.useState<AiChatProvider>("doubao");
-  const [messages, setMessages] = React.useState<AiChatMessage[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      content: "我会复用端口管理中已登录的豆包或 ChatGPT 页面来回答问题。"
-    }
-  ]);
-  const [input, setInput] = React.useState("");
+  const resolvedStorageKey = storageKey || "global";
+  const initialSession = React.useMemo(() => readStoredSession(resolvedStorageKey), [resolvedStorageKey]);
+  const [provider, setProvider] = React.useState<AiChatProvider>(
+    initialSession?.provider === "chatgpt" ? "chatgpt" : "doubao"
+  );
+  const [messages, setMessages] = React.useState<AiChatMessage[]>(
+    initialSession?.messages?.length ? initialSession.messages.map(trimStoredMessage) : DEFAULT_ASSISTANT_MESSAGES
+  );
+  const [input, setInput] = React.useState(initialSession?.input ?? "");
   const [isPending, setIsPending] = React.useState(false);
   const [status, setStatus] = React.useState("");
   const messagesRef = React.useRef<HTMLDivElement | null>(null);
@@ -77,8 +134,33 @@ export function AiAssistantPanel({
   const contextVisible = showContext ?? !compact;
 
   React.useEffect(() => {
+    const nextSession = readStoredSession(resolvedStorageKey);
+    setProvider(nextSession?.provider === "chatgpt" ? "chatgpt" : "doubao");
+    setMessages(nextSession?.messages?.length ? nextSession.messages.map(trimStoredMessage) : DEFAULT_ASSISTANT_MESSAGES);
+    setInput(nextSession?.input ?? "");
+    setStatus("");
+  }, [resolvedStorageKey]);
+
+  React.useEffect(() => {
     messagesRef.current?.scrollTo({ top: messagesRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, isPending]);
+
+  React.useEffect(() => {
+    const nextMessages = messages.slice(-MAX_PERSISTED_MESSAGES).map(trimStoredMessage);
+    writeStoredSession(resolvedStorageKey, {
+      version: 1,
+      provider,
+      input,
+      messages: nextMessages
+    });
+  }, [input, messages, provider, resolvedStorageKey]);
+
+  const clearChat = React.useCallback(() => {
+    setMessages(DEFAULT_ASSISTANT_MESSAGES);
+    setInput("");
+    setStatus("");
+    clearStoredSession(resolvedStorageKey);
+  }, [resolvedStorageKey]);
 
   const sendPrompt = React.useCallback(async (message: string) => {
     if (!message || isPending) return;
@@ -133,6 +215,7 @@ export function AiAssistantPanel({
     onInitialInputConsumed?.();
     setInput((current) => {
       const currentText = current.trim();
+      if (currentText === selectedText || currentText.includes(selectedText)) return current;
       return currentText ? `${selectedText}\n\n${currentText}` : selectedText;
     });
     window.setTimeout(() => textareaRef.current?.focus(), 0);
@@ -148,7 +231,11 @@ export function AiAssistantPanel({
     <main className={compact ? "assistant-layout compact" : "assistant-layout"} aria-label="AI 聊天助手">
       <section className={compact ? "assistant-page compact" : "assistant-page"}>
         <header className="assistant-header">
-          <div className="assistant-title-block">
+          <div
+            className={onDragHandlePointerDown ? "assistant-title-block draggable" : "assistant-title-block"}
+            onPointerDown={onDragHandlePointerDown}
+            title={onDragHandlePointerDown ? "拖动 AI 小窗" : undefined}
+          >
             <div className="assistant-mark" aria-hidden="true">
               <Bot size={compact ? 18 : 24} />
             </div>
@@ -167,6 +254,9 @@ export function AiAssistantPanel({
                 ChatGPT
               </button>
             </div>
+            <button className="icon-button assistant-close-button" type="button" title="清空聊天记录" aria-label="清空聊天记录" onClick={clearChat} disabled={isPending}>
+              <Trash2 size={15} />
+            </button>
             {onClose ? (
               <button className="icon-button assistant-close-button" type="button" title="关闭" aria-label="关闭 AI 小窗" onClick={onClose}>
                 <X size={15} />

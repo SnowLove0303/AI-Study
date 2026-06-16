@@ -707,6 +707,7 @@ function App() {
       </main>
       ) : activeSection === "assistant" ? (
         <AiAssistantPanel
+          storageKey="workspace-assistant"
           courseTitle={activeCourse?.name ?? ""}
           nodeTitle={selectedMindMapNode.title}
           contextText={mindMapOutline.slice(0, 80).map((item) => `${"  ".repeat(Math.max(0, item.level))}${item.title}`).join("\n")}

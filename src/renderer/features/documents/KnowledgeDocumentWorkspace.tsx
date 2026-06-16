@@ -859,6 +859,33 @@ export function KnowledgeDocumentWorkspace({
     });
   }, [readSelectedText]);
 
+  const startAssistantPanelDrag = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (!aiContextMenu || event.button !== 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const origin = { x: aiContextMenu.x, y: aiContextMenu.y };
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const nextPoint = clampAiPanelPoint({
+        x: origin.x + moveEvent.clientX - startX,
+        y: origin.y + moveEvent.clientY - startY
+      });
+      setAiContextMenu((current) => current ? { ...current, ...nextPoint } : current);
+    };
+    const stopDrag = () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopDrag);
+      window.removeEventListener("pointercancel", stopDrag);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopDrag, { once: true });
+    window.addEventListener("pointercancel", stopDrag, { once: true });
+  }, [aiContextMenu]);
+
   React.useEffect(() => {
     const handleCanvasEditorAskAiMenu = (event: MouseEvent) => {
       const target = event.target instanceof Element ? event.target : null;
@@ -1075,6 +1102,8 @@ export function KnowledgeDocumentWorkspace({
             compact
             title="文档 AI 助手"
             initialInput={assistantDraft}
+            storageKey={`document:${courseId ?? "none"}:${mindMapId ?? "none"}:${selectedNode.id}`}
+            onDragHandlePointerDown={startAssistantPanelDrag}
             onInitialInputConsumed={() => {
               setAssistantDraft("");
             }}

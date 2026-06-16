@@ -749,7 +749,7 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
     : ["扫码登录", "手机号登录", "请先登录", "立即登录", "验证码", "滑块验证", "安全验证", "操作频繁"];
   const chromeNoise = provider === "chatgpt"
     ? ["ChatGPT", "New chat", "新聊天", "发送", "停止生成", "重新生成", "Search", "Reason", "Canvas"]
-    : ["Doubao", "豆包", "新对话", "历史对话", "发送", "停止生成", "重新生成", "内容由豆包AI生成"];
+    : ["Doubao", "豆包", "新对话", "历史对话", "发送", "停止生成", "重新生成", "复制", "分享", "点赞", "点踩", "内容由豆包AI生成"];
 
   return `
 (async () => {
@@ -782,6 +782,7 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
       if (!line || seen.has(line)) continue;
       if (prompt.includes(line)) continue;
       if (chromeNoise.some((noise) => line === noise || line.includes(noise))) continue;
+      if (/^(展开|收起|重新回答|换一换|继续生成|已停止生成)$/.test(line)) continue;
       if (line.includes("AIstudy 内嵌学习助手") || line.startsWith("当前课程：") || line.startsWith("当前节点：") || line.startsWith("参考上下文：") || line.startsWith("用户问题：")) continue;
       if (line.includes("ChatGPT can make mistakes") || line.includes("仅供参考")) {
         if (lines.length > 0) break;
@@ -803,7 +804,7 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
       .map((text) => text.trim())
       .filter(Boolean);
     if (contentRoots.length > 0) {
-      return contentRoots.sort((left, right) => left.length - right.length)[0];
+      return contentRoots.sort((left, right) => right.length - left.length)[0];
     }
     return row.innerText || row.textContent || "";
   };
