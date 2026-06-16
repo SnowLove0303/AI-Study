@@ -742,14 +742,14 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
     ? ["#prompt-textarea", "[contenteditable='true'][id='prompt-textarea']", "[contenteditable='true']", "textarea", "[role='textbox']"]
     : ["textarea", "[contenteditable='true']", "[role='textbox']"];
   const assistantSelectors = provider === "chatgpt"
-    ? ["[data-message-author-role='assistant']", "article[data-testid^='conversation-turn-']", "section[data-testid^='conversation-turn-']"]
+    ? ["[data-message-author-role='assistant']", "article[data-turn='assistant']", "section[data-turn='assistant']"]
     : ["[aria-label='doc_editor'] .v_list_row", "[aria-label='doc_editor'] [class*='message']"];
   const gateWords = provider === "chatgpt"
     ? ["Log in", "Sign up", "登录", "注册", "验证", "captcha", "Cloudflare", "Checking your browser"]
     : ["扫码登录", "手机号登录", "请先登录", "立即登录", "验证码", "滑块验证", "安全验证", "操作频繁"];
   const chromeNoise = provider === "chatgpt"
-    ? ["ChatGPT", "New chat", "新聊天", "发送", "停止生成", "重新生成", "Search", "Reason", "Canvas"]
-    : ["Doubao", "豆包", "新对话", "历史对话", "发送", "停止生成", "重新生成", "复制", "分享", "点赞", "点踩", "内容由豆包AI生成"];
+    ? ["ChatGPT", "New chat", "新聊天", "发送", "停止生成", "重新生成", "Search", "Reason", "Canvas", "说:", "说："]
+    : ["Doubao", "豆包", "新对话", "历史对话", "发送", "停止生成", "重新生成", "复制", "分享", "点赞", "点踩", "内容由豆包AI生成", "快速", "图像生成", "帮我写作", "编程"];
 
   return `
 (async () => {
@@ -771,20 +771,47 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
     .split(/\\r?\\n/)
     .map((line) => line.trim())
     .filter(Boolean);
+  const normalizeCompact = (text) => String(text || "").replace(/\\s+/g, "");
+  const promptCompact = normalizeCompact(prompt);
+  const uniqueVisibleElements = (selectors) => {
+    const seen = new Set();
+    const elements = [];
+    for (const selector of selectors) {
+      for (const element of Array.from(document.querySelectorAll(selector))) {
+        if (seen.has(element) || !visible(element)) continue;
+        seen.add(element);
+        elements.push(element);
+      }
+    }
+    return elements;
+  };
+  const isPromptEchoLine = (line) => {
+    const compactLine = normalizeCompact(line);
+    return Boolean(promptCompact) && (
+      compactLine === promptCompact ||
+      promptCompact.includes(compactLine) ||
+      compactLine.includes(promptCompact)
+    );
+  };
   const cleanReply = (text) => {
     const seen = new Set();
     const lines = [];
     for (const rawLine of normalizeLines(text)) {
       const line = rawLine
+        .replace(/^ChatGPT\\s*说[:：]?\\s*/i, "")
         .replace(/^ChatGPT\\s*[:：]?\\s*/i, "")
+        .replace(/^Doubao\\s*[:：]?\\s*/i, "")
         .replace(/^豆包\\s*[:：]?\\s*/i, "")
+        .replace(/^说[:：]?\\s*/i, "")
         .trim();
       if (!line || seen.has(line)) continue;
-      if (prompt.includes(line)) continue;
+      if (/^(说|你|ChatGPT|豆包|Doubao)[:：]?$/.test(line)) continue;
+      if (isPromptEchoLine(line)) continue;
       if (chromeNoise.some((noise) => line === noise || line.includes(noise))) continue;
+      if (/^搜索\\s*\\d+\\s*个关键词/.test(line) || /^参考\\s*\\d+\\s*篇资料/.test(line)) continue;
       if (/^(展开|收起|重新回答|换一换|继续生成|已停止生成)$/.test(line)) continue;
       if (line.includes("AIstudy 内嵌学习助手") || line.startsWith("当前课程：") || line.startsWith("当前节点：") || line.startsWith("参考上下文：") || line.startsWith("用户问题：")) continue;
-      if (line.includes("ChatGPT can make mistakes") || line.includes("仅供参考")) {
+      if (line.includes("ChatGPT can make mistakes") || line.includes("ChatGPT 也可能会犯错") || line.includes("仅供参考") || line.includes("AI 生成内容")) {
         if (lines.length > 0) break;
         continue;
       }
@@ -797,6 +824,19 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
   const getDoubaoMessageRows = () => Array.from(document.querySelectorAll("[aria-label='doc_editor'] .v_list_row"))
     .filter(visible);
   const isDoubaoUserRow = (row) => Boolean(row.querySelector("[class*='bg-g-send-msg-bubble-bg']"));
+  const isDoubaoResearchText = (text) => /^搜索\\s*\\d+\\s*个关键词/.test(text)
+    || /^参考\\s*\\d+\\s*篇资料/.test(text)
+    || text.includes("篇资料")
+    || text.includes("个关键词");
+  const scoreDoubaoReplyRoot = (text) => {
+    const cleaned = cleanReply(text);
+    if (!cleaned) return -1000;
+    let score = Math.min(cleaned.length, 1200);
+    if (isDoubaoResearchText(text)) score -= 900;
+    if (text.includes(prompt)) score -= 600;
+    if (/^[\\s\\S]{0,80}$/.test(cleaned)) score -= 20;
+    return score;
+  };
   const getDoubaoReplyText = (row) => {
     const contentRoots = Array.from(row.querySelectorAll(".md-box-root,[class*='md-box-root'],[class*='markdown'],[class*='answer']"))
       .filter(visible)
@@ -804,9 +844,22 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
       .map((text) => text.trim())
       .filter(Boolean);
     if (contentRoots.length > 0) {
-      return contentRoots.sort((left, right) => right.length - left.length)[0];
+      return contentRoots.sort((left, right) => scoreDoubaoReplyRoot(right) - scoreDoubaoReplyRoot(left))[0];
     }
     return row.innerText || row.textContent || "";
+  };
+  const getDoubaoCandidateRows = () => {
+    const rows = getDoubaoMessageRows();
+    const latestPromptUserIndex = rows.reduce((latest, row, index) => {
+      if (!isDoubaoUserRow(row)) return latest;
+      const rowText = normalizeCompact(row.innerText || row.textContent || "");
+      return rowText.includes(promptCompact) || index >= beforeDoubaoRowCount ? index : latest;
+    }, -1);
+    if (latestPromptUserIndex >= 0) {
+      return rows.slice(latestPromptUserIndex + 1).filter((row) => !isDoubaoUserRow(row));
+    }
+    const newRows = rows.slice(Math.max(0, beforeDoubaoRowCount)).filter((row) => !isDoubaoUserRow(row));
+    return newRows.length ? newRows : [];
   };
   const beforeDoubaoRowCount = provider === "doubao" ? getDoubaoMessageRows().length : 0;
   const input = inputSelectors.map((selector) => document.querySelector(selector)).find(visible);
@@ -815,7 +868,7 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
   }
 
   const beforeText = bodyText();
-  const beforeAssistantCount = assistantSelectors.flatMap((selector) => Array.from(document.querySelectorAll(selector))).filter(visible).length;
+  const beforeAssistantCount = uniqueVisibleElements(assistantSelectors).length;
   input.focus({ preventScroll: true });
   if ("value" in input) {
     const descriptor = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")
@@ -874,17 +927,16 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
 
   const getLatestAssistantReply = () => {
     if (provider === "doubao") {
-      const rows = getDoubaoMessageRows();
-      const newRows = rows.slice(Math.max(0, beforeDoubaoRowCount));
-      const candidates = (newRows.length ? newRows : rows.slice(-4)).filter((row) => !isDoubaoUserRow(row));
+      const candidates = getDoubaoCandidateRows();
       for (let index = candidates.length - 1; index >= 0; index -= 1) {
         const reply = cleanReply(getDoubaoReplyText(candidates[index]));
         if (reply) return reply;
       }
+      const currentText = bodyText();
+      const changed = currentText.startsWith(beforeText) ? currentText.slice(beforeText.length) : "";
+      return cleanReply(changed);
     }
-    const assistantBlocks = assistantSelectors
-      .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
-      .filter(visible);
+    const assistantBlocks = uniqueVisibleElements(assistantSelectors);
     const newBlocks = assistantBlocks.slice(Math.max(0, beforeAssistantCount));
     const candidates = newBlocks.length ? newBlocks : assistantBlocks.slice(-3);
     for (let index = candidates.length - 1; index >= 0; index -= 1) {
@@ -907,8 +959,11 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
       stableText = reply;
       stableCount = reply ? 1 : 0;
     }
-    const generating = bodyText().includes("停止生成") || bodyText().includes("正在生成") || Boolean(document.querySelector("button[data-testid='stop-button'],button[aria-label*='Stop'],button[aria-label*='停止']"));
-    if (stableCount >= 2 && !generating) break;
+    const generating = bodyText().includes("停止生成") ||
+      bodyText().includes("正在生成") ||
+      bodyText().includes("生成中") ||
+      Boolean(document.querySelector("button[data-testid='stop-button'],button[aria-label*='Stop'],button[aria-label*='停止'],button[aria-label*='正在']"));
+    if (stableCount >= 3 && !generating) break;
   }
 
   if (hasGate() && !stableText) {
