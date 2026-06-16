@@ -785,6 +785,13 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
     }
     return elements;
   };
+  const sortByDocumentOrder = (elements) => elements.slice().sort((left, right) => {
+    if (left === right) return 0;
+    const position = left.compareDocumentPosition(right);
+    if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+    if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+    return 0;
+  });
   const isPromptEchoLine = (line) => {
     const compactLine = normalizeCompact(line);
     return Boolean(promptCompact) && (
@@ -861,6 +868,57 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
     const newRows = rows.slice(Math.max(0, beforeDoubaoRowCount)).filter((row) => !isDoubaoUserRow(row));
     return newRows.length ? newRows : [];
   };
+  const getChatGptAssistantAfterPrompt = () => {
+    const roleBlocks = sortByDocumentOrder(uniqueVisibleElements(["[data-message-author-role]"]));
+    if (roleBlocks.length > 0) {
+      let latestUserIndex = -1;
+      for (let index = roleBlocks.length - 1; index >= 0; index -= 1) {
+        const role = roleBlocks[index].getAttribute("data-message-author-role");
+        if (role !== "user") continue;
+        const text = normalizeCompact(roleBlocks[index].innerText || roleBlocks[index].textContent || "");
+        if (!text) continue;
+        if (text.includes(promptCompact) || promptCompact.includes(text)) {
+          latestUserIndex = index;
+          break;
+        }
+      }
+
+      if (latestUserIndex >= 0) {
+        const assistantBlocks = roleBlocks.slice(latestUserIndex + 1)
+          .filter((element) => element.getAttribute("data-message-author-role") === "assistant");
+        for (let index = assistantBlocks.length - 1; index >= 0; index -= 1) {
+          const reply = cleanReply(assistantBlocks[index].innerText || assistantBlocks[index].textContent || "");
+          if (reply) return reply;
+        }
+      }
+    }
+
+    const turnBlocks = sortByDocumentOrder(uniqueVisibleElements([
+      "article[data-testid^='conversation-turn-']",
+      "section[data-testid^='conversation-turn-']",
+      "[data-testid^='conversation-turn-']"
+    ]));
+    let latestPromptTurnIndex = -1;
+    for (let index = turnBlocks.length - 1; index >= 0; index -= 1) {
+      const turn = turnBlocks[index];
+      const turnText = normalizeCompact(turn.innerText || turn.textContent || "");
+      const hasAssistantRole = Boolean(turn.querySelector("[data-message-author-role='assistant']"));
+      if (!turnText || hasAssistantRole) continue;
+      if (turnText.includes(promptCompact) || promptCompact.includes(turnText)) {
+        latestPromptTurnIndex = index;
+        break;
+      }
+    }
+    if (latestPromptTurnIndex < 0) return "";
+    const assistantTurns = turnBlocks.slice(latestPromptTurnIndex + 1)
+      .filter((turn) => Boolean(turn.querySelector("[data-message-author-role='assistant']")) || /assistant/i.test(turn.getAttribute("data-turn") || ""));
+    for (let index = 0; index < assistantTurns.length; index += 1) {
+      const assistantRoot = assistantTurns[index].querySelector("[data-message-author-role='assistant']") || assistantTurns[index];
+      const reply = cleanReply(assistantRoot.innerText || assistantRoot.textContent || "");
+      if (reply) return reply;
+    }
+    return "";
+  };
   const beforeDoubaoRowCount = provider === "doubao" ? getDoubaoMessageRows().length : 0;
   const input = inputSelectors.map((selector) => document.querySelector(selector)).find(visible);
   if (!input) {
@@ -936,16 +994,16 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
       const changed = currentText.startsWith(beforeText) ? currentText.slice(beforeText.length) : "";
       return cleanReply(changed);
     }
+    const anchoredChatGptReply = getChatGptAssistantAfterPrompt();
+    if (anchoredChatGptReply) return anchoredChatGptReply;
     const assistantBlocks = uniqueVisibleElements(assistantSelectors);
     const newBlocks = assistantBlocks.slice(Math.max(0, beforeAssistantCount));
-    const candidates = newBlocks.length ? newBlocks : assistantBlocks.slice(-3);
+    const candidates = newBlocks;
     for (let index = candidates.length - 1; index >= 0; index -= 1) {
       const reply = cleanReply(candidates[index].innerText || candidates[index].textContent || "");
       if (reply) return reply;
     }
-    const currentText = bodyText();
-    const changed = currentText.startsWith(beforeText) ? currentText.slice(beforeText.length) : currentText;
-    return cleanReply(changed);
+    return "";
   };
 
   let stableText = "";

@@ -50,6 +50,11 @@ type AiContextMenuState = {
   text?: string;
 };
 
+type AiPanelSize = {
+  width: number;
+  height: number;
+};
+
 type DocumentFormatBrushState = {
   format: KnowledgeDocumentFormatState;
   reusable: boolean;
@@ -61,6 +66,14 @@ const FONT_SIZE_OPTIONS = [12, 14, 16, 18, 20, 24, 28, 32];
 const COLOR_OPTIONS = ["#1f2937", "#2563eb", "#0f766e", "#d97706", "#dc2626", "#7c3aed"];
 const AI_CONTEXT_PANEL_WIDTH = 430;
 const AI_CONTEXT_PANEL_HEIGHT = 560;
+const AI_CONTEXT_PANEL_MIN_WIDTH = 360;
+const AI_CONTEXT_PANEL_MIN_HEIGHT = 420;
+const AI_CONTEXT_PANEL_MARGIN = 12;
+
+const DEFAULT_AI_PANEL_SIZE: AiPanelSize = {
+  width: AI_CONTEXT_PANEL_WIDTH,
+  height: AI_CONTEXT_PANEL_HEIGHT
+};
 
 declare global {
   interface Window {
@@ -215,22 +228,31 @@ function isBlankDocumentSnapshot(snapshot: KnowledgeDocumentSnapshot | null | un
     !hasDocumentContent(snapshot.content.graffiti);
 }
 
-function clampAiPanelPoint(point: { x: number; y: number }) {
-  const margin = 12;
-  const maxX = Math.max(margin, window.innerWidth - AI_CONTEXT_PANEL_WIDTH - margin);
-  const maxY = Math.max(margin, window.innerHeight - AI_CONTEXT_PANEL_HEIGHT - margin);
+function clampAiPanelSize(size: AiPanelSize): AiPanelSize {
+  const maxWidth = Math.max(AI_CONTEXT_PANEL_MIN_WIDTH, window.innerWidth - AI_CONTEXT_PANEL_MARGIN * 2);
+  const maxHeight = Math.max(AI_CONTEXT_PANEL_MIN_HEIGHT, window.innerHeight - AI_CONTEXT_PANEL_MARGIN * 2);
   return {
-    x: Math.min(Math.max(margin, point.x), maxX),
-    y: Math.min(Math.max(margin, point.y), maxY)
+    width: Math.min(Math.max(AI_CONTEXT_PANEL_MIN_WIDTH, size.width), maxWidth),
+    height: Math.min(Math.max(AI_CONTEXT_PANEL_MIN_HEIGHT, size.height), maxHeight)
   };
 }
 
-function getAiPanelAnchorPoint(anchor: HTMLElement | null, fallback: { x: number; y: number }) {
+function clampAiPanelPoint(point: { x: number; y: number }, size: AiPanelSize = DEFAULT_AI_PANEL_SIZE) {
+  const nextSize = clampAiPanelSize(size);
+  const maxX = Math.max(AI_CONTEXT_PANEL_MARGIN, window.innerWidth - nextSize.width - AI_CONTEXT_PANEL_MARGIN);
+  const maxY = Math.max(AI_CONTEXT_PANEL_MARGIN, window.innerHeight - nextSize.height - AI_CONTEXT_PANEL_MARGIN);
+  return {
+    x: Math.min(Math.max(AI_CONTEXT_PANEL_MARGIN, point.x), maxX),
+    y: Math.min(Math.max(AI_CONTEXT_PANEL_MARGIN, point.y), maxY)
+  };
+}
+
+function getAiPanelAnchorPoint(anchor: HTMLElement | null, fallback: { x: number; y: number }, size: AiPanelSize = DEFAULT_AI_PANEL_SIZE) {
   const rect = anchor?.getBoundingClientRect();
   if (!rect) return fallback;
 
   return {
-    x: rect.right - AI_CONTEXT_PANEL_WIDTH,
+    x: rect.right - size.width,
     y: rect.bottom + 8
   };
 }
@@ -278,6 +300,8 @@ export function KnowledgeDocumentWorkspace({
   const [documentViewportState, setDocumentViewportState] =
     React.useState<ViewportScrollState>(EMPTY_VIEWPORT_SCROLL_STATE);
   const [assistantDraft, setAssistantDraft] = React.useState("");
+  const [aiPanelSize, setAiPanelSize] = React.useState<AiPanelSize>(DEFAULT_AI_PANEL_SIZE);
+  const aiPanelSizeRef = React.useRef<AiPanelSize>(DEFAULT_AI_PANEL_SIZE);
   const [aiContextMenu, setAiContextMenu] = React.useState<AiContextMenuState | null>(null);
   const [skipBlankPages, setSkipBlankPages] = React.useState(false);
   const [isNavigatingDocument, setIsNavigatingDocument] = React.useState(false);
@@ -294,6 +318,7 @@ export function KnowledgeDocumentWorkspace({
   );
   const documentKeyRef = React.useRef(documentKey);
   documentKeyRef.current = documentKey;
+  aiPanelSizeRef.current = aiPanelSize;
   const currentNavigationIndex = React.useMemo(
     () => navigationItems.findIndex((item) => item.nodeId === selectedNode.id),
     [navigationItems, selectedNode.id]
@@ -730,10 +755,12 @@ export function KnowledgeDocumentWorkspace({
             if (assistantText) {
               lastSelectedTextRef.current = assistantText;
             }
-            const point = getAiPanelAnchorPoint(toolbarAiButtonRef.current, latestContextMenuPointRef.current);
+            const nextSize = clampAiPanelSize(aiPanelSizeRef.current);
+            const point = getAiPanelAnchorPoint(toolbarAiButtonRef.current, latestContextMenuPointRef.current, nextSize);
             setAssistantDraft(assistantText);
+            setAiPanelSize(nextSize);
             setAiContextMenu({
-              ...clampAiPanelPoint(point),
+              ...clampAiPanelPoint(point, nextSize),
               text: assistantText
             });
           }
@@ -969,12 +996,14 @@ export function KnowledgeDocumentWorkspace({
     if (selectedText) {
       lastSelectedTextRef.current = selectedText;
     }
+    const nextSize = clampAiPanelSize(aiPanelSize);
     setAssistantDraft(selectedText);
+    setAiPanelSize(nextSize);
     setAiContextMenu({
-      ...clampAiPanelPoint(point),
+      ...clampAiPanelPoint(point, nextSize),
       text: selectedText
     });
-  }, [readSelectedText]);
+  }, [aiPanelSize, readSelectedText]);
 
   const startAssistantPanelDrag = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     if (!aiContextMenu || event.button !== 0) return;
@@ -989,7 +1018,7 @@ export function KnowledgeDocumentWorkspace({
       const nextPoint = clampAiPanelPoint({
         x: origin.x + moveEvent.clientX - startX,
         y: origin.y + moveEvent.clientY - startY
-      });
+      }, aiPanelSize);
       setAiContextMenu((current) => current ? { ...current, ...nextPoint } : current);
     };
     const stopDrag = () => {
@@ -1001,7 +1030,50 @@ export function KnowledgeDocumentWorkspace({
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", stopDrag, { once: true });
     window.addEventListener("pointercancel", stopDrag, { once: true });
-  }, [aiContextMenu]);
+  }, [aiContextMenu, aiPanelSize]);
+
+  const startAssistantPanelResize = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (!aiContextMenu || event.button !== 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const originSize = aiPanelSize;
+    const originPoint = { x: aiContextMenu.x, y: aiContextMenu.y };
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const nextSize = clampAiPanelSize({
+        width: originSize.width + moveEvent.clientX - startX,
+        height: originSize.height + moveEvent.clientY - startY
+      });
+      const nextPoint = clampAiPanelPoint(originPoint, nextSize);
+      setAiPanelSize(nextSize);
+      setAiContextMenu((current) => current ? { ...current, ...nextPoint } : current);
+    };
+    const stopResize = () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopResize);
+      window.removeEventListener("pointercancel", stopResize);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopResize, { once: true });
+    window.addEventListener("pointercancel", stopResize, { once: true });
+  }, [aiContextMenu, aiPanelSize]);
+
+  React.useEffect(() => {
+    const keepAssistantPanelInViewport = () => {
+      const nextSize = clampAiPanelSize(aiPanelSize);
+      setAiPanelSize(nextSize);
+      setAiContextMenu((current) => current ? { ...current, ...clampAiPanelPoint(current, nextSize) } : current);
+    };
+
+    window.addEventListener("resize", keepAssistantPanelInViewport);
+    return () => {
+      window.removeEventListener("resize", keepAssistantPanelInViewport);
+    };
+  }, [aiPanelSize]);
 
   React.useEffect(() => {
     const handleCanvasEditorAskAiMenu = (event: MouseEvent) => {
@@ -1023,8 +1095,10 @@ export function KnowledgeDocumentWorkspace({
       host.querySelectorAll(".ce-contextmenu-container").forEach((menu) => menu.remove());
 
       setAssistantDraft(selectedText);
+      const nextSize = clampAiPanelSize(aiPanelSize);
+      setAiPanelSize(nextSize);
       setAiContextMenu({
-        ...clampAiPanelPoint(getAiPanelAnchorPoint(toolbarAiButtonRef.current, latestContextMenuPointRef.current)),
+        ...clampAiPanelPoint(getAiPanelAnchorPoint(toolbarAiButtonRef.current, latestContextMenuPointRef.current, nextSize), nextSize),
         text: selectedText
       });
     };
@@ -1033,7 +1107,7 @@ export function KnowledgeDocumentWorkspace({
     return () => {
       document.removeEventListener("mousedown", handleCanvasEditorAskAiMenu, true);
     };
-  }, [readSelectedText]);
+  }, [aiPanelSize, readSelectedText]);
 
   const rememberContextMenuPoint = React.useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     latestContextMenuPointRef.current = {
@@ -1170,10 +1244,11 @@ export function KnowledgeDocumentWorkspace({
           className={aiContextMenu ? "document-ai-toolbar-button active" : "document-ai-toolbar-button"}
           onClick={(event) => {
             event.stopPropagation();
+            const nextSize = clampAiPanelSize(aiPanelSizeRef.current);
             openAssistantPanel(getAiPanelAnchorPoint(toolbarAiButtonRef.current, {
-              x: window.innerWidth - AI_CONTEXT_PANEL_WIDTH - 12,
+              x: window.innerWidth - nextSize.width - AI_CONTEXT_PANEL_MARGIN,
               y: 96
-            }));
+            }, nextSize));
           }}
           disabled={!canUseDocument}
         >
@@ -1206,7 +1281,7 @@ export function KnowledgeDocumentWorkspace({
         <div
           ref={aiPanelRef}
           className="document-ai-context-menu is-chat"
-          style={{ left: aiContextMenu.x, top: aiContextMenu.y }}
+          style={{ left: aiContextMenu.x, top: aiContextMenu.y, width: aiPanelSize.width, height: aiPanelSize.height }}
           role="dialog"
           onClick={(event) => event.stopPropagation()}
         >
@@ -1220,6 +1295,12 @@ export function KnowledgeDocumentWorkspace({
               setAssistantDraft("");
             }}
             onClose={() => setAiContextMenu(null)}
+          />
+          <div
+            className="document-ai-resize-handle"
+            title="拖动调整 AI 小窗大小"
+            aria-hidden="true"
+            onPointerDown={startAssistantPanelResize}
           />
         </div>
       ) : null}
