@@ -21,11 +21,15 @@ import type {
   MindMapViewportState
 } from "./mindMapTypes";
 
-type SimpleMindMapConstructor = new (options: Record<string, unknown>) => any;
+type SimpleMindMapConstructor = {
+  new (options: Record<string, unknown>): any;
+  usePlugin: (plugin: SimpleMindMapPlugin) => SimpleMindMapConstructor;
+};
 type SimpleMindMapPlugin = {
   new (options: Record<string, unknown>): any;
   instanceName?: string;
 };
+type UnknownModule = Record<string, unknown> | { default?: unknown } | unknown;
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const DOT_GRID_PATTERN_ID = "aistudy-dot-grid-pattern";
@@ -42,6 +46,19 @@ let pluginsRegistered = false;
 let xmindExportPluginPromise: Promise<SimpleMindMapPlugin> | null = null;
 let simpleMindMapConstructorPromise: Promise<SimpleMindMapConstructor> | null = null;
 
+function resolveModuleConstructor<T>(module: UnknownModule, moduleName: string): T {
+  let candidate = module;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (typeof candidate === "function") {
+      return candidate as T;
+    }
+    if (!candidate || typeof candidate !== "object" || !("default" in candidate)) break;
+    candidate = (candidate as { default?: unknown }).default;
+  }
+
+  throw new Error(`${moduleName} 加载失败：模块没有返回可构造的导出`);
+}
+
 async function loadSimpleMindMap() {
   if (simpleMindMapConstructorPromise) return simpleMindMapConstructorPromise;
 
@@ -55,14 +72,14 @@ async function loadSimpleMindMap() {
 
 async function loadSimpleMindMapModules() {
   const [
-    { default: MindMap },
-    { default: Drag },
-    { default: Select },
-    { default: KeyboardNavigation },
-    { default: AssociativeLine },
-    { default: OuterFrame },
-    { default: Export },
-    { default: Scrollbar }
+    mindMapModule,
+    dragModule,
+    selectModule,
+    keyboardNavigationModule,
+    associativeLineModule,
+    outerFrameModule,
+    exportModule,
+    scrollbarModule
   ] = await Promise.all([
     import("simple-mind-map"),
     import("simple-mind-map/src/plugins/Drag.js"),
@@ -73,6 +90,20 @@ async function loadSimpleMindMapModules() {
     import("simple-mind-map/src/plugins/Export.js"),
     import("simple-mind-map/src/plugins/Scrollbar.js")
   ]);
+  const MindMap = resolveModuleConstructor<SimpleMindMapConstructor>(mindMapModule, "simple-mind-map");
+  const Drag = resolveModuleConstructor<SimpleMindMapPlugin>(dragModule, "simple-mind-map Drag plugin");
+  const Select = resolveModuleConstructor<SimpleMindMapPlugin>(selectModule, "simple-mind-map Select plugin");
+  const KeyboardNavigation = resolveModuleConstructor<SimpleMindMapPlugin>(
+    keyboardNavigationModule,
+    "simple-mind-map KeyboardNavigation plugin"
+  );
+  const AssociativeLine = resolveModuleConstructor<SimpleMindMapPlugin>(
+    associativeLineModule,
+    "simple-mind-map AssociativeLine plugin"
+  );
+  const OuterFrame = resolveModuleConstructor<SimpleMindMapPlugin>(outerFrameModule, "simple-mind-map OuterFrame plugin");
+  const Export = resolveModuleConstructor<SimpleMindMapPlugin>(exportModule, "simple-mind-map Export plugin");
+  const Scrollbar = resolveModuleConstructor<SimpleMindMapPlugin>(scrollbarModule, "simple-mind-map Scrollbar plugin");
 
   if (!pluginsRegistered) {
     MindMap.usePlugin(Drag)
@@ -85,7 +116,7 @@ async function loadSimpleMindMapModules() {
     pluginsRegistered = true;
   }
 
-  return MindMap as SimpleMindMapConstructor;
+  return MindMap;
 }
 
 export async function preloadSimpleMindMapEditor() {
@@ -96,7 +127,7 @@ async function ensureXMindExportPlugin(editor: any) {
   if (editor.doExportXMind) return;
   if (!xmindExportPluginPromise) {
     xmindExportPluginPromise = import("simple-mind-map/src/plugins/ExportXMind.js").then(
-      ({ default: ExportXMind }) => ExportXMind as SimpleMindMapPlugin
+      (module) => resolveModuleConstructor<SimpleMindMapPlugin>(module, "simple-mind-map ExportXMind plugin")
     );
   }
   const ExportXMind = await xmindExportPluginPromise;
