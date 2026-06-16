@@ -1,5 +1,5 @@
 import React from "react";
-import { Bold, Bot, ChevronLeft, ChevronRight, Italic, Redo2, Save, SkipForward, Type, Underline, Undo2 } from "lucide-react";
+import { Bold, Bot, ChevronLeft, ChevronRight, Italic, Paintbrush, Redo2, Repeat2, Save, SkipForward, Type, Underline, Undo2 } from "lucide-react";
 import { createCanvasDocumentEditor, createEmptyKnowledgeDocumentSnapshot } from "./canvasEditorAdapter";
 import { AiAssistantPanel } from "../assistant/AiAssistantPanel";
 import { createKnowledgeDocumentBinding } from "../../domain/coreContracts";
@@ -48,6 +48,11 @@ type AiContextMenuState = {
   x: number;
   y: number;
   text?: string;
+};
+
+type DocumentFormatBrushState = {
+  format: KnowledgeDocumentFormatState;
+  reusable: boolean;
 };
 
 const SAVE_DEBOUNCE_MS = 900;
@@ -242,8 +247,6 @@ export function KnowledgeDocumentWorkspace({
   const aiPanelRef = React.useRef<HTMLDivElement | null>(null);
   const latestContextMenuPointRef = React.useRef({ x: 0, y: 0 });
   const lastSelectedTextRef = React.useRef("");
-  const ignoreNextAiOutsideClickRef = React.useRef(false);
-  const aiContextMenuOpenRef = React.useRef(false);
   const editorRef = React.useRef<KnowledgeDocumentEditorHandle | null>(null);
   const saveTimerRef = React.useRef<number | null>(null);
   const pendingSaveRef = React.useRef<PendingDocumentSave | null>(null);
@@ -263,6 +266,10 @@ export function KnowledgeDocumentWorkspace({
     italic: false,
     underline: false
   });
+  const formatStateRef = React.useRef(formatState);
+  const formatBrushRef = React.useRef<DocumentFormatBrushState | null>(null);
+  const formatBrushApplyFrameRef = React.useRef<number | null>(null);
+  const [formatBrush, setFormatBrush] = React.useState<DocumentFormatBrushState | null>(null);
   const [isLoading, setIsLoading] = React.useState(false);
   const [isSaving, setIsSaving] = React.useState(false);
   const [isEditorReady, setIsEditorReady] = React.useState(false);
@@ -297,6 +304,72 @@ export function KnowledgeDocumentWorkspace({
     currentNavigationIndex >= 0 &&
     currentNavigationIndex < navigationItems.length - 1 &&
     Boolean(onNodeSelect);
+
+  const updateFormatState = React.useCallback((nextState: KnowledgeDocumentFormatState) => {
+    formatStateRef.current = nextState;
+    setFormatState(nextState);
+  }, []);
+
+  const setActiveFormatBrush = React.useCallback((nextBrush: DocumentFormatBrushState | null) => {
+    formatBrushRef.current = nextBrush;
+    setFormatBrush(nextBrush);
+  }, []);
+
+  const copyCurrentFormatToBrush = React.useCallback(
+    (reusable = false) => {
+      if (!canUseDocument || !isEditorReady) return;
+      setActiveFormatBrush({
+        format: { ...formatStateRef.current },
+        reusable
+      });
+      editorRef.current?.focus();
+    },
+    [canUseDocument, isEditorReady, setActiveFormatBrush]
+  );
+
+  const startSingleUseFormatBrush = React.useCallback(() => {
+    copyCurrentFormatToBrush(false);
+  }, [copyCurrentFormatToBrush]);
+
+  const toggleReusableFormatBrush = React.useCallback(() => {
+    if (formatBrushRef.current?.reusable) {
+      setActiveFormatBrush(null);
+      return;
+    }
+    copyCurrentFormatToBrush(true);
+  }, [copyCurrentFormatToBrush, setActiveFormatBrush]);
+
+  const applyFormatBrushToSelection = React.useCallback(() => {
+    const brush = formatBrushRef.current;
+    const editor = editorRef.current;
+    if (!brush || !editor?.hasSelection()) return;
+
+    editor.applyFormat(brush.format, formatStateRef.current);
+    editor.focus();
+    if (!brush.reusable) {
+      setActiveFormatBrush(null);
+    }
+  }, [setActiveFormatBrush]);
+
+  const scheduleFormatBrushApply = React.useCallback(() => {
+    if (!formatBrushRef.current || formatBrushApplyFrameRef.current !== null) return;
+    formatBrushApplyFrameRef.current = window.requestAnimationFrame(() => {
+      formatBrushApplyFrameRef.current = window.requestAnimationFrame(() => {
+        formatBrushApplyFrameRef.current = null;
+        applyFormatBrushToSelection();
+      });
+    });
+  }, [applyFormatBrushToSelection]);
+
+  const handleEditorKeyDownCapture = React.useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (event.key !== "Escape" || !formatBrushRef.current) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setActiveFormatBrush(null);
+    },
+    [setActiveFormatBrush]
+  );
 
   const upsertDocumentStatus = React.useCallback((status: KnowledgeDocumentStatus) => {
     const nextMap = new Map(documentStatusMapRef.current);
@@ -398,10 +471,11 @@ export function KnowledgeDocumentWorkspace({
   React.useLayoutEffect(() => {
     editorRef.current?.destroy();
     editorRef.current = null;
+    setActiveFormatBrush(null);
     setIsEditorReady(false);
     mountRef.current?.replaceChildren();
     commitDocumentViewportState(EMPTY_VIEWPORT_SCROLL_STATE);
-  }, [commitDocumentViewportState, documentKey]);
+  }, [commitDocumentViewportState, documentKey, setActiveFormatBrush]);
 
   const persistDocument = React.useCallback(
     async (input: PendingDocumentSave, silent = false): Promise<KnowledgeDocumentRecord | null> => {
@@ -606,14 +680,13 @@ export function KnowledgeDocumentWorkspace({
             queueSnapshotSave(nextSnapshot);
             scheduleDocumentViewportStateUpdate();
           },
-          onFormatChanged: setFormatState,
+          onFormatChanged: updateFormatState,
           onAskAi: (selectedText) => {
             const assistantText = selectedText.trim() || lastSelectedTextRef.current;
             if (assistantText) {
               lastSelectedTextRef.current = assistantText;
             }
             const point = getAiPanelAnchorPoint(toolbarAiButtonRef.current, latestContextMenuPointRef.current);
-            ignoreNextAiOutsideClickRef.current = aiContextMenuOpenRef.current;
             setAssistantDraft(assistantText);
             setAiContextMenu({
               ...clampAiPanelPoint(point),
@@ -675,7 +748,7 @@ export function KnowledgeDocumentWorkspace({
       setIsEditorReady(false);
       mount.replaceChildren();
     };
-  }, [canUseDocument, documentKey, queueSnapshotSave, resetDocumentViewportToStart, scheduleDocumentViewportStateUpdate, snapshot]);
+  }, [canUseDocument, documentKey, queueSnapshotSave, resetDocumentViewportToStart, scheduleDocumentViewportStateUpdate, snapshot, updateFormatState]);
 
   React.useEffect(() => {
     const mount = mountRef.current;
@@ -711,6 +784,10 @@ export function KnowledgeDocumentWorkspace({
       if (viewportUpdateFrameRef.current !== null) {
         window.cancelAnimationFrame(viewportUpdateFrameRef.current);
         viewportUpdateFrameRef.current = null;
+      }
+      if (formatBrushApplyFrameRef.current !== null) {
+        window.cancelAnimationFrame(formatBrushApplyFrameRef.current);
+        formatBrushApplyFrameRef.current = null;
       }
       void flushPendingSave(true);
       editorRef.current?.destroy();
@@ -925,38 +1002,6 @@ export function KnowledgeDocumentWorkspace({
     };
   }, []);
 
-  React.useEffect(() => {
-    aiContextMenuOpenRef.current = Boolean(aiContextMenu);
-  }, [aiContextMenu]);
-
-  React.useEffect(() => {
-    if (!aiContextMenu) return undefined;
-    const closeMenu = (event: MouseEvent) => {
-      if (event.defaultPrevented) return;
-      if (ignoreNextAiOutsideClickRef.current) {
-        ignoreNextAiOutsideClickRef.current = false;
-        return;
-      }
-      const target = event.target instanceof Node ? event.target : null;
-      if (
-        target &&
-        (aiPanelRef.current?.contains(target) || toolbarAiButtonRef.current?.contains(target))
-      ) {
-        return;
-      }
-      setAiContextMenu(null);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setAiContextMenu(null);
-    };
-    window.addEventListener("click", closeMenu);
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      window.removeEventListener("click", closeMenu);
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [aiContextMenu]);
-
   return (
     <div className="document-workspace">
       <div className="document-local-toolbar" aria-label="文档编辑工具栏">
@@ -1023,6 +1068,26 @@ export function KnowledgeDocumentWorkspace({
             />
           ))}
         </div>
+        <button
+          type="button"
+          title={formatBrush && !formatBrush.reusable ? "单次格式刷已开启：选择文字后应用一次" : "单次格式刷"}
+          className={formatBrush && !formatBrush.reusable ? "format-button document-format-brush-button active" : "format-button document-format-brush-button"}
+          aria-pressed={Boolean(formatBrush && !formatBrush.reusable)}
+          onClick={startSingleUseFormatBrush}
+          disabled={!canUseDocument || !isEditorReady}
+        >
+          <Paintbrush size={15} />
+        </button>
+        <button
+          type="button"
+          title={formatBrush?.reusable ? "关闭连续格式刷" : "连续格式刷"}
+          className={formatBrush?.reusable ? "format-button document-format-brush-button active" : "format-button document-format-brush-button"}
+          aria-pressed={Boolean(formatBrush?.reusable)}
+          onClick={toggleReusableFormatBrush}
+          disabled={!canUseDocument || !isEditorReady}
+        >
+          <Repeat2 size={15} />
+        </button>
         <span className="mindmap-toolbar-spacer" />
         <div className="document-page-navigation" aria-label="文档翻页">
           <button
@@ -1078,7 +1143,13 @@ export function KnowledgeDocumentWorkspace({
         </button>
       </div>
 
-      <div className="document-editor-shell" onContextMenu={rememberContextMenuPoint}>
+      <div
+        className={formatBrush ? "document-editor-shell is-format-brush" : "document-editor-shell"}
+        onContextMenu={rememberContextMenuPoint}
+        onMouseUpCapture={scheduleFormatBrushApply}
+        onKeyUpCapture={scheduleFormatBrushApply}
+        onKeyDownCapture={handleEditorKeyDownCapture}
+      >
         <div ref={mountRef} className="document-editor-host" aria-hidden={!canUseDocument} />
         <ViewportScrollbars
           className="document-viewport-scrollbars"
@@ -1115,6 +1186,7 @@ export function KnowledgeDocumentWorkspace({
       <div className="document-status-strip">
         <span>{canUseDocument ? selectedNode.title || "未命名" : "未选择节点"}</span>
         <span>{storageText}</span>
+        {formatBrush ? <span>{formatBrush.reusable ? "连续格式刷" : "单次格式刷"}</span> : null}
         {skipBlankPages ? <span>跳过空白页</span> : null}
         {isNavigatingDocument ? <span>切换中</span> : null}
         {savedAt ? <span>已保存 {savedAt}</span> : null}

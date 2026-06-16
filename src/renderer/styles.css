@@ -1065,6 +1065,10 @@ h3 {
   color: var(--accent);
 }
 
+.document-local-toolbar .document-format-brush-button.active {
+  box-shadow: 0 0 0 2px rgba(31, 111, 209, 0.12);
+}
+
 .document-local-toolbar .document-ai-toolbar-button {
   min-width: 48px;
   padding: 0 9px;
@@ -1164,6 +1168,12 @@ h3 {
   overflow: auto;
   background: #ffffff;
   scrollbar-width: none;
+}
+
+.document-editor-shell.is-format-brush,
+.document-editor-shell.is-format-brush .document-editor-host,
+.document-editor-shell.is-format-brush .document-editor-host canvas {
+  cursor: copy;
 }
 
 .document-editor-host::-webkit-scrollbar {

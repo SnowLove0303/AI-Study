@@ -183,6 +183,7 @@ export async function createCanvasDocumentEditor(
   return {
     getSnapshot: () => toSnapshot(editor),
     getSelectedText: () => rememberSelectedText() || lastSelectedText,
+    hasSelection: () => Boolean(readEditorRangeText(editor)),
     exec: (command) => {
       if (command === "undo") editor.command.executeUndo();
       if (command === "redo") editor.command.executeRedo();
@@ -196,6 +197,14 @@ export async function createCanvasDocumentEditor(
     },
     setColor: (color) => {
       editor.command.executeColor(color);
+    },
+    applyFormat: (format, currentFormat) => {
+      editor.command.executeSize(format.fontSize);
+      editor.command.executeColor(format.color);
+      if (Boolean(currentFormat.bold) !== Boolean(format.bold)) editor.command.executeBold();
+      if (Boolean(currentFormat.italic) !== Boolean(format.italic)) editor.command.executeItalic();
+      if (Boolean(currentFormat.underline) !== Boolean(format.underline)) editor.command.executeUnderline();
+      events.onSnapshotChanged?.(toSnapshot(editor));
     },
     focus: () => {
       editor.command.executeFocus();

@@ -59,9 +59,11 @@ export type KnowledgeDocumentFormatState = {
 export type KnowledgeDocumentEditorHandle = {
   getSnapshot: () => KnowledgeDocumentSnapshot;
   getSelectedText: () => string;
+  hasSelection: () => boolean;
   exec: (command: KnowledgeDocumentCommand) => void;
   setFontSize: (size: number) => void;
   setColor: (color: string) => void;
+  applyFormat: (format: KnowledgeDocumentFormatState, currentFormat: KnowledgeDocumentFormatState) => void;
   focus: () => void;
   destroy: () => void;
 };
