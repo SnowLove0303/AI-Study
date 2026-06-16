@@ -14,9 +14,12 @@ const DOCUMENT_EDITOR = AISTUDY_CORE_CONTRACT.editors.knowledgeDocument;
 const LANDSCAPE_PAGE_RATIO = 794 / 1123;
 const DOCUMENT_PAGE_GUTTER = 32;
 const MIN_LANDSCAPE_PAGE_WIDTH = 960;
+const ZERO_WIDTH_BREAK = "\u200B";
 
 type CanvasEditorModule = typeof import("@hufe921/canvas-editor");
 type CanvasEditorInstance = InstanceType<CanvasEditorModule["default"]>;
+type CanvasRange = ReturnType<CanvasEditorInstance["command"]["getRange"]>;
+type InlineStyleKey = "font" | "size" | "bold" | "color" | "highlight" | "italic" | "underline" | "strikeout" | "textDecoration";
 
 type CanvasDocumentEvents = {
   onSnapshotChanged?: (snapshot: KnowledgeDocumentSnapshot) => void;
@@ -25,6 +28,18 @@ type CanvasDocumentEvents = {
 };
 
 let canvasEditorModulePromise: Promise<CanvasEditorModule> | null = null;
+
+const INLINE_STYLE_KEYS: InlineStyleKey[] = [
+  "font",
+  "size",
+  "bold",
+  "color",
+  "highlight",
+  "italic",
+  "underline",
+  "strikeout",
+  "textDecoration"
+];
 
 function loadCanvasEditor() {
   if (canvasEditorModulePromise) return canvasEditorModulePromise;
@@ -61,6 +76,120 @@ function normalizeEditorData(content: KnowledgeDocumentContent | null | undefine
     main: normalizeElementList(content?.main),
     footer: Array.isArray(content?.footer) ? (content?.footer as IElement[]) : undefined,
     graffiti: Array.isArray(content?.graffiti) ? (content?.graffiti as IEditorData["graffiti"]) : undefined
+  };
+}
+
+function hasExplicitInlineStyle(element: IElement) {
+  return INLINE_STYLE_KEYS.some((key) => element[key] !== undefined && element[key] !== null);
+}
+
+function copyInlineStyle(target: IElement, source: IElement): IElement {
+  const next = { ...target };
+  for (const key of INLINE_STYLE_KEYS) {
+    if (source[key] !== undefined && source[key] !== null) {
+      next[key] = source[key] as never;
+    }
+  }
+  return next;
+}
+
+function isParagraphBoundary(element: IElement) {
+  return element.type === "pageBreak" || element.value.includes("\n") || element.value.includes(ZERO_WIDTH_BREAK);
+}
+
+function isTextElement(element: IElement) {
+  return !element.type || element.type === "text";
+}
+
+function hasVisibleText(element: IElement) {
+  return isTextElement(element) && element.value.replace(/\s/g, "").length > 0;
+}
+
+function findParagraphBounds(elementList: IElement[], index: number) {
+  let start = 0;
+  let end = elementList.length - 1;
+
+  for (let i = Math.min(index, elementList.length - 1); i >= 0; i -= 1) {
+    if (isParagraphBoundary(elementList[i])) {
+      start = i + 1;
+      break;
+    }
+  }
+
+  for (let i = Math.max(index, 0); i < elementList.length; i += 1) {
+    if (isParagraphBoundary(elementList[i])) {
+      end = i - 1;
+      break;
+    }
+  }
+
+  return { start, end };
+}
+
+function inheritLeadingTextStyle(elementList: IElement[], range: CanvasRange) {
+  if (range.startIndex !== range.endIndex || elementList.length === 0) {
+    return { elementList, changed: false };
+  }
+
+  const cursorIndex = Math.min(Math.max(range.startIndex, 0), elementList.length - 1);
+  const { start, end } = findParagraphBounds(elementList, cursorIndex);
+  if (start > end) {
+    return { elementList, changed: false };
+  }
+
+  let firstStyledIndex = -1;
+  for (let i = start; i <= end; i += 1) {
+    const element = elementList[i];
+    if (!hasVisibleText(element)) continue;
+    if (hasExplicitInlineStyle(element)) {
+      firstStyledIndex = i;
+      break;
+    }
+  }
+
+  if (firstStyledIndex <= start || cursorIndex > firstStyledIndex) {
+    return { elementList, changed: false };
+  }
+
+  const leadingIndexes: number[] = [];
+  for (let i = start; i < firstStyledIndex; i += 1) {
+    const element = elementList[i];
+    if (!hasVisibleText(element)) continue;
+    if (hasExplicitInlineStyle(element)) {
+      return { elementList, changed: false };
+    }
+    leadingIndexes.push(i);
+  }
+
+  if (leadingIndexes.length === 0) {
+    return { elementList, changed: false };
+  }
+
+  const styleSource = elementList[firstStyledIndex];
+  const next = elementList.slice();
+  for (const index of leadingIndexes) {
+    next[index] = copyInlineStyle(next[index], styleSource);
+  }
+
+  return { elementList: next, changed: true };
+}
+
+function inheritDocumentInputStyle(content: IEditorData, range: CanvasRange) {
+  if (range.isCrossRowCol || range.tableId || (range.zone && range.zone !== "main")) {
+    return { content, changed: false };
+  }
+
+  const normalizedMain = inheritLeadingTextStyle(content.main, range);
+  if (!normalizedMain.changed) {
+    return { content, changed: false };
+  }
+
+  return {
+    content: {
+      ...content,
+      main: normalizedMain.elementList
+    },
+    changed: true
   };
 }
 
@@ -154,6 +283,7 @@ export async function createCanvasDocumentEditor(
   });
 
   let lastSelectedText = "";
+  let isNormalizingInputStyle = false;
   const rememberSelectedText = () => {
     const selectedText = readEditorRangeText(editor);
     if (selectedText) {
@@ -163,6 +293,33 @@ export async function createCanvasDocumentEditor(
   };
 
   editor.listener.contentChange = () => {
+    if (isNormalizingInputStyle) {
+      events.onSnapshotChanged?.(toSnapshot(editor));
+      return;
+    }
+
+    const range = editor.command.getRange();
+    const currentValue = editor.command.getValue();
+    const normalizedInputStyle = inheritDocumentInputStyle(normalizeEditorData(currentValue.data), range);
+
+    if (normalizedInputStyle.changed) {
+      isNormalizingInputStyle = true;
+      try {
+        editor.command.executeSetValue(normalizedInputStyle.content, { isSetCursor: false });
+        editor.command.executeSetRange(
+          range.startIndex,
+          range.endIndex,
+          range.tableId,
+          range.startTdIndex,
+          range.endTdIndex,
+          range.startTrIndex,
+          range.endTrIndex
+        );
+      } finally {
+        isNormalizingInputStyle = false;
+      }
+    }
+
     events.onSnapshotChanged?.(toSnapshot(editor));
   };
   editor.listener.rangeStyleChange = (payload) => {

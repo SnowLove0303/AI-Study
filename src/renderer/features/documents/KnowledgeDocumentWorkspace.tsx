@@ -268,7 +268,6 @@ export function KnowledgeDocumentWorkspace({
   });
   const formatStateRef = React.useRef(formatState);
   const formatBrushRef = React.useRef<DocumentFormatBrushState | null>(null);
-  const formatBrushApplyFrameRef = React.useRef<number | null>(null);
   const [formatBrush, setFormatBrush] = React.useState<DocumentFormatBrushState | null>(null);
   const [isLoading, setIsLoading] = React.useState(false);
   const [isSaving, setIsSaving] = React.useState(false);
@@ -315,51 +314,66 @@ export function KnowledgeDocumentWorkspace({
     setFormatBrush(nextBrush);
   }, []);
 
-  const copyCurrentFormatToBrush = React.useCallback(
-    (reusable = false) => {
-      if (!canUseDocument || !isEditorReady) return;
+  const applyFormatBrushToSelection = React.useCallback((brush: DocumentFormatBrushState) => {
+    const editor = editorRef.current;
+    if (!editor?.hasSelection()) {
+      setError(brush.reusable ? "连续格式刷已取样，请先框选要套用格式的文字" : "单次格式刷已取样，请先框选要套用格式的文字");
+      return false;
+    }
+
+    editor.applyFormat(brush.format, formatStateRef.current);
+    editor.focus();
+    setError("");
+    return true;
+  }, []);
+
+  const runFormatBrush = React.useCallback(
+    (reusable: boolean) => {
+      const editor = editorRef.current;
+      if (!canUseDocument || !isEditorReady || !editor) return;
+
+      const activeBrush = formatBrushRef.current;
+      const isSameBrush = Boolean(activeBrush && activeBrush.reusable === reusable);
+      const hasSelection = editor.hasSelection();
+
+      if (isSameBrush && activeBrush) {
+        if (!hasSelection) {
+          setActiveFormatBrush(null);
+          setError("");
+          editor.focus();
+          return;
+        }
+
+        const applied = applyFormatBrushToSelection(activeBrush);
+        if (applied && !activeBrush.reusable) {
+          setActiveFormatBrush(null);
+        }
+        return;
+      }
+
+      if (!hasSelection) {
+        setError(reusable ? "请先框选要复制格式的文字，再点击连续格式刷取样" : "请先框选要复制格式的文字，再点击单次格式刷取样");
+        editor.focus();
+        return;
+      }
+
       setActiveFormatBrush({
         format: { ...formatStateRef.current },
         reusable
       });
-      editorRef.current?.focus();
+      setError("");
+      editor.focus();
     },
-    [canUseDocument, isEditorReady, setActiveFormatBrush]
+    [applyFormatBrushToSelection, canUseDocument, isEditorReady, setActiveFormatBrush]
   );
 
   const startSingleUseFormatBrush = React.useCallback(() => {
-    copyCurrentFormatToBrush(false);
-  }, [copyCurrentFormatToBrush]);
+    runFormatBrush(false);
+  }, [runFormatBrush]);
 
   const toggleReusableFormatBrush = React.useCallback(() => {
-    if (formatBrushRef.current?.reusable) {
-      setActiveFormatBrush(null);
-      return;
-    }
-    copyCurrentFormatToBrush(true);
-  }, [copyCurrentFormatToBrush, setActiveFormatBrush]);
-
-  const applyFormatBrushToSelection = React.useCallback(() => {
-    const brush = formatBrushRef.current;
-    const editor = editorRef.current;
-    if (!brush || !editor?.hasSelection()) return;
-
-    editor.applyFormat(brush.format, formatStateRef.current);
-    editor.focus();
-    if (!brush.reusable) {
-      setActiveFormatBrush(null);
-    }
-  }, [setActiveFormatBrush]);
-
-  const scheduleFormatBrushApply = React.useCallback(() => {
-    if (!formatBrushRef.current || formatBrushApplyFrameRef.current !== null) return;
-    formatBrushApplyFrameRef.current = window.requestAnimationFrame(() => {
-      formatBrushApplyFrameRef.current = window.requestAnimationFrame(() => {
-        formatBrushApplyFrameRef.current = null;
-        applyFormatBrushToSelection();
-      });
-    });
-  }, [applyFormatBrushToSelection]);
+    runFormatBrush(true);
+  }, [runFormatBrush]);
 
   const handleEditorKeyDownCapture = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -785,10 +799,6 @@ export function KnowledgeDocumentWorkspace({
         window.cancelAnimationFrame(viewportUpdateFrameRef.current);
         viewportUpdateFrameRef.current = null;
       }
-      if (formatBrushApplyFrameRef.current !== null) {
-        window.cancelAnimationFrame(formatBrushApplyFrameRef.current);
-        formatBrushApplyFrameRef.current = null;
-      }
       void flushPendingSave(true);
       editorRef.current?.destroy();
     };
@@ -1070,7 +1080,7 @@ export function KnowledgeDocumentWorkspace({
         </div>
         <button
           type="button"
-          title={formatBrush && !formatBrush.reusable ? "单次格式刷已开启：选择文字后应用一次" : "单次格式刷"}
+          title={formatBrush && !formatBrush.reusable ? "单次格式刷已取样：框选目标文字后再次点击应用" : "单次格式刷：框选源文字后点击取样"}
           className={formatBrush && !formatBrush.reusable ? "format-button document-format-brush-button active" : "format-button document-format-brush-button"}
           aria-pressed={Boolean(formatBrush && !formatBrush.reusable)}
           onClick={startSingleUseFormatBrush}
@@ -1078,9 +1088,10 @@ export function KnowledgeDocumentWorkspace({
         >
           <Paintbrush size={15} />
         </button>
+        <span className="mindmap-toolbar-separator" />
         <button
           type="button"
-          title={formatBrush?.reusable ? "关闭连续格式刷" : "连续格式刷"}
+          title={formatBrush?.reusable ? "连续格式刷已取样：框选目标文字后再次点击应用；无选区点击关闭" : "连续格式刷：框选源文字后点击取样"}
           className={formatBrush?.reusable ? "format-button document-format-brush-button active" : "format-button document-format-brush-button"}
           aria-pressed={Boolean(formatBrush?.reusable)}
           onClick={toggleReusableFormatBrush}
@@ -1146,8 +1157,6 @@ export function KnowledgeDocumentWorkspace({
       <div
         className={formatBrush ? "document-editor-shell is-format-brush" : "document-editor-shell"}
         onContextMenu={rememberContextMenuPoint}
-        onMouseUpCapture={scheduleFormatBrushApply}
-        onKeyUpCapture={scheduleFormatBrushApply}
         onKeyDownCapture={handleEditorKeyDownCapture}
       >
         <div ref={mountRef} className="document-editor-host" aria-hidden={!canUseDocument} />
@@ -1186,7 +1195,7 @@ export function KnowledgeDocumentWorkspace({
       <div className="document-status-strip">
         <span>{canUseDocument ? selectedNode.title || "未命名" : "未选择节点"}</span>
         <span>{storageText}</span>
-        {formatBrush ? <span>{formatBrush.reusable ? "连续格式刷" : "单次格式刷"}</span> : null}
+        {formatBrush ? <span>{formatBrush.reusable ? "连续格式刷已取样" : "单次格式刷已取样"}</span> : null}
         {skipBlankPages ? <span>跳过空白页</span> : null}
         {isNavigatingDocument ? <span>切换中</span> : null}
         {savedAt ? <span>已保存 {savedAt}</span> : null}
