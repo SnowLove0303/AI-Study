@@ -737,26 +737,23 @@ async function getAiChatPageTarget(platform: ChromePortDefinition) {
   return target;
 }
 
-function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string) {
+function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string, requestId: string) {
   const inputSelectors = provider === "chatgpt"
     ? ["#prompt-textarea", "[contenteditable='true'][id='prompt-textarea']", "[contenteditable='true']", "textarea", "[role='textbox']"]
     : ["textarea", "[contenteditable='true']", "[role='textbox']"];
-  const assistantSelectors = provider === "chatgpt"
-    ? ["[data-message-author-role='assistant']", "article[data-turn='assistant']", "section[data-turn='assistant']"]
-    : ["[aria-label='doc_editor'] .v_list_row", "[aria-label='doc_editor'] [class*='message']"];
   const gateWords = provider === "chatgpt"
     ? ["Log in", "Sign up", "登录", "注册", "验证", "captcha", "Cloudflare", "Checking your browser"]
     : ["扫码登录", "手机号登录", "请先登录", "立即登录", "验证码", "滑块验证", "安全验证", "操作频繁"];
   const chromeNoise = provider === "chatgpt"
-    ? ["ChatGPT", "New chat", "新聊天", "发送", "停止生成", "重新生成", "Search", "Reason", "Canvas", "说:", "说："]
-    : ["Doubao", "豆包", "新对话", "历史对话", "发送", "停止生成", "重新生成", "复制", "分享", "点赞", "点踩", "内容由豆包AI生成", "快速", "图像生成", "帮我写作", "编程"];
+    ? ["New chat", "新聊天", "发送", "停止生成", "重新生成", "Search", "Reason", "Canvas", "来源"]
+    : ["新对话", "历史对话", "发送", "停止生成", "重新生成", "复制", "分享", "点赞", "点踩", "快速", "图像生成", "帮我写作", "编程"];
 
   return `
 (async () => {
   const provider = ${JSON.stringify(provider)};
   const prompt = ${JSON.stringify(prompt)};
+  const requestId = ${JSON.stringify(requestId)};
   const inputSelectors = ${JSON.stringify(inputSelectors)};
-  const assistantSelectors = ${JSON.stringify(assistantSelectors)};
   const gateWords = ${JSON.stringify(gateWords)};
   const chromeNoise = ${JSON.stringify(chromeNoise)};
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -768,7 +765,9 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
   };
   const bodyText = () => document.body?.innerText || "";
   const normalizeLines = (text) => String(text || "")
-    .split(/\\r?\\n/)
+    .replaceAll("\\r\\n", "\\n")
+    .replaceAll("\\r", "\\n")
+    .split("\\n")
     .map((line) => line.trim())
     .filter(Boolean);
   const normalizeCompact = (text) => String(text || "").replace(/\\s+/g, "");
@@ -800,10 +799,10 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
       compactLine.includes(promptCompact)
     );
   };
-  const cleanReply = (text) => {
-    const seen = new Set();
+  const cleanReply = (text, options = {}) => {
+    const stripPromptEcho = options.stripPromptEcho !== false;
     const lines = [];
-    for (const rawLine of normalizeLines(text)) {
+    for (const rawLine of String(text || "").replaceAll("\\r\\n", "\\n").replaceAll("\\r", "\\n").split("\\n")) {
       const line = rawLine
         .replace(/^ChatGPT\\s*说[:：]?\\s*/i, "")
         .replace(/^ChatGPT\\s*[:：]?\\s*/i, "")
@@ -811,25 +810,80 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
         .replace(/^豆包\\s*[:：]?\\s*/i, "")
         .replace(/^说[:：]?\\s*/i, "")
         .trim();
-      if (!line || seen.has(line)) continue;
+      if (!line) {
+        if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
+        continue;
+      }
       if (/^(说|你|ChatGPT|豆包|Doubao)[:：]?$/.test(line)) continue;
-      if (isPromptEchoLine(line)) continue;
-      if (chromeNoise.some((noise) => line === noise || line.includes(noise))) continue;
+      if (stripPromptEcho && isPromptEchoLine(line)) continue;
+      if (chromeNoise.some((noise) => line === noise)) continue;
       if (/^搜索\\s*\\d+\\s*个关键词/.test(line) || /^参考\\s*\\d+\\s*篇资料/.test(line)) continue;
       if (/^(展开|收起|重新回答|换一换|继续生成|已停止生成)$/.test(line)) continue;
       if (line.includes("AIstudy 内嵌学习助手") || line.startsWith("当前课程：") || line.startsWith("当前节点：") || line.startsWith("参考上下文：") || line.startsWith("用户问题：")) continue;
-      if (line.includes("ChatGPT can make mistakes") || line.includes("ChatGPT 也可能会犯错") || line.includes("仅供参考") || line.includes("AI 生成内容")) {
-        if (lines.length > 0) break;
+      if (line.includes("ChatGPT can make mistakes") || line.includes("ChatGPT 也可能会犯错")) {
         continue;
       }
-      seen.add(line);
       lines.push(line);
     }
-    return lines.join("\\n").trim();
+    return lines.join("\\n").replace(/\\n{3,}/g, "\\n\\n").trim();
   };
   const hasGate = () => gateWords.some((word) => bodyText().includes(word));
-  const getDoubaoMessageRows = () => Array.from(document.querySelectorAll("[aria-label='doc_editor'] .v_list_row"))
-    .filter(visible);
+  const getDoubaoMessageRows = () => {
+    const rows = uniqueVisibleElements(["[aria-label='doc_editor'] .v_list_row"]);
+    if (rows.length > 0) return sortByDocumentOrder(rows);
+    return sortByDocumentOrder(uniqueVisibleElements([
+      "[aria-label='doc_editor'] [class*='message']",
+      "[aria-label='doc_editor'] [class*='bubble']"
+    ]));
+  };
+  const isElementTaggedForRequest = (element) => element?.getAttribute("data-aistudy-request-id") === requestId;
+  const getElementText = (element) => element?.innerText || element?.textContent || "";
+  const rowLooksLikeCurrentPrompt = (row) => {
+    const rowText = normalizeCompact(getElementText(row));
+    if (!promptCompact || !rowText) return false;
+    if (rowText === promptCompact) return true;
+    if (promptCompact.includes(rowText) && rowText.length >= Math.min(4, promptCompact.length)) return true;
+    return rowText.includes(promptCompact) && rowText.length <= promptCompact.length + 24;
+  };
+  const getDoubaoUserRows = () => {
+    const rows = getDoubaoMessageRows();
+    const bubbleRows = rows.filter(isDoubaoUserRow);
+    return bubbleRows.length > 0 ? bubbleRows : rows.filter(rowLooksLikeCurrentPrompt);
+  };
+  const getDoubaoCurrentUserRow = () => {
+    const tagged = getDoubaoUserRows().find(isElementTaggedForRequest);
+    if (tagged) return tagged;
+    const userRows = getDoubaoUserRows();
+    const newUserRows = userRows.filter((row) => getDoubaoMessageRows().indexOf(row) >= beforeDoubaoRowCount);
+    const candidates = newUserRows.length ? newUserRows : userRows.filter(rowLooksLikeCurrentPrompt);
+    for (let index = candidates.length - 1; index >= 0; index -= 1) {
+      const row = candidates[index];
+      if (!isDoubaoUserRow(row) && !rowLooksLikeCurrentPrompt(row)) continue;
+      row.setAttribute("data-aistudy-request-id", requestId);
+      return row;
+    }
+    return null;
+  };
+  const getChatGptRoleBlocks = () => sortByDocumentOrder(uniqueVisibleElements(["[data-message-author-role]"]));
+  const getChatGptUserBlocks = () => getChatGptRoleBlocks()
+    .filter((element) => element.getAttribute("data-message-author-role") === "user");
+  const getChatGptCurrentUserBlock = () => {
+    const tagged = getChatGptUserBlocks().find(isElementTaggedForRequest);
+    if (tagged) return tagged;
+    const userBlocks = getChatGptUserBlocks();
+    const newUserBlocks = userBlocks.slice(Math.max(0, beforeChatGptUserCount));
+    const candidates = newUserBlocks.length ? newUserBlocks : userBlocks;
+    for (let index = candidates.length - 1; index >= 0; index -= 1) {
+      const element = candidates[index];
+      const text = normalizeCompact(getElementText(element));
+      if (!text) continue;
+      if (text.includes(promptCompact) || promptCompact.includes(text)) {
+        element.setAttribute("data-aistudy-request-id", requestId);
+        return element;
+      }
+    }
+    return null;
+  };
   const isDoubaoUserRow = (row) => Boolean(row.querySelector("[class*='bg-g-send-msg-bubble-bg']"));
   const isDoubaoResearchText = (text) => /^搜索\\s*\\d+\\s*个关键词/.test(text)
     || /^参考\\s*\\d+\\s*篇资料/.test(text)
@@ -856,41 +910,35 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
     return row.innerText || row.textContent || "";
   };
   const getDoubaoCandidateRows = () => {
+    const currentUserRow = getDoubaoCurrentUserRow();
+    if (!currentUserRow) return [];
     const rows = getDoubaoMessageRows();
-    const latestPromptUserIndex = rows.reduce((latest, row, index) => {
-      if (!isDoubaoUserRow(row)) return latest;
-      const rowText = normalizeCompact(row.innerText || row.textContent || "");
-      return rowText.includes(promptCompact) || index >= beforeDoubaoRowCount ? index : latest;
-    }, -1);
-    if (latestPromptUserIndex >= 0) {
-      return rows.slice(latestPromptUserIndex + 1).filter((row) => !isDoubaoUserRow(row));
+    const latestPromptUserIndex = rows.indexOf(currentUserRow);
+    if (latestPromptUserIndex < 0) return [];
+    const candidates = [];
+    for (let index = latestPromptUserIndex + 1; index < rows.length; index += 1) {
+      const row = rows[index];
+      if (isDoubaoUserRow(row)) break;
+      candidates.push(row);
     }
-    const newRows = rows.slice(Math.max(0, beforeDoubaoRowCount)).filter((row) => !isDoubaoUserRow(row));
-    return newRows.length ? newRows : [];
+    return candidates;
   };
   const getChatGptAssistantAfterPrompt = () => {
-    const roleBlocks = sortByDocumentOrder(uniqueVisibleElements(["[data-message-author-role]"]));
-    if (roleBlocks.length > 0) {
-      let latestUserIndex = -1;
-      for (let index = roleBlocks.length - 1; index >= 0; index -= 1) {
-        const role = roleBlocks[index].getAttribute("data-message-author-role");
-        if (role !== "user") continue;
-        const text = normalizeCompact(roleBlocks[index].innerText || roleBlocks[index].textContent || "");
-        if (!text) continue;
-        if (text.includes(promptCompact) || promptCompact.includes(text)) {
-          latestUserIndex = index;
-          break;
-        }
+    const currentUserBlock = getChatGptCurrentUserBlock();
+    if (!currentUserBlock) return "";
+    const roleBlocks = getChatGptRoleBlocks();
+    const latestUserIndex = roleBlocks.indexOf(currentUserBlock);
+    if (latestUserIndex >= 0) {
+      const replies = [];
+      for (let index = latestUserIndex + 1; index < roleBlocks.length; index += 1) {
+        const element = roleBlocks[index];
+        const role = element.getAttribute("data-message-author-role");
+        if (role === "user") break;
+        if (role !== "assistant") continue;
+        const reply = cleanReply(getElementText(element), { stripPromptEcho: false });
+        if (reply) replies.push(reply);
       }
-
-      if (latestUserIndex >= 0) {
-        const assistantBlocks = roleBlocks.slice(latestUserIndex + 1)
-          .filter((element) => element.getAttribute("data-message-author-role") === "assistant");
-        for (let index = assistantBlocks.length - 1; index >= 0; index -= 1) {
-          const reply = cleanReply(assistantBlocks[index].innerText || assistantBlocks[index].textContent || "");
-          if (reply) return reply;
-        }
-      }
+      if (replies.length > 0) return replies.join("\\n\\n").trim();
     }
 
     const turnBlocks = sortByDocumentOrder(uniqueVisibleElements([
@@ -898,56 +946,73 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
       "section[data-testid^='conversation-turn-']",
       "[data-testid^='conversation-turn-']"
     ]));
-    let latestPromptTurnIndex = -1;
-    for (let index = turnBlocks.length - 1; index >= 0; index -= 1) {
-      const turn = turnBlocks[index];
-      const turnText = normalizeCompact(turn.innerText || turn.textContent || "");
-      const hasAssistantRole = Boolean(turn.querySelector("[data-message-author-role='assistant']"));
-      if (!turnText || hasAssistantRole) continue;
-      if (turnText.includes(promptCompact) || promptCompact.includes(turnText)) {
-        latestPromptTurnIndex = index;
-        break;
-      }
-    }
+    const latestPromptTurnIndex = turnBlocks.findIndex((turn) => turn === currentUserBlock || turn.contains(currentUserBlock));
     if (latestPromptTurnIndex < 0) return "";
-    const assistantTurns = turnBlocks.slice(latestPromptTurnIndex + 1)
-      .filter((turn) => Boolean(turn.querySelector("[data-message-author-role='assistant']")) || /assistant/i.test(turn.getAttribute("data-turn") || ""));
-    for (let index = 0; index < assistantTurns.length; index += 1) {
-      const assistantRoot = assistantTurns[index].querySelector("[data-message-author-role='assistant']") || assistantTurns[index];
-      const reply = cleanReply(assistantRoot.innerText || assistantRoot.textContent || "");
-      if (reply) return reply;
+    const replies = [];
+    for (let index = latestPromptTurnIndex + 1; index < turnBlocks.length; index += 1) {
+      const turn = turnBlocks[index];
+      if (turn.querySelector("[data-message-author-role='user']") || /user/i.test(turn.getAttribute("data-turn") || "")) break;
+      if (!turn.querySelector("[data-message-author-role='assistant']") && !/assistant/i.test(turn.getAttribute("data-turn") || "")) continue;
+      const assistantRoot = turn.querySelector("[data-message-author-role='assistant']") || turn;
+      const reply = cleanReply(getElementText(assistantRoot), { stripPromptEcho: false });
+      if (reply) replies.push(reply);
     }
-    return "";
+    return replies.join("\\n\\n").trim();
   };
   const beforeDoubaoRowCount = provider === "doubao" ? getDoubaoMessageRows().length : 0;
-  const input = inputSelectors.map((selector) => document.querySelector(selector)).find(visible);
+  const beforeChatGptUserCount = provider === "chatgpt" ? getChatGptUserBlocks().length : 0;
+  const composerRoot = provider === "doubao"
+    ? document.querySelector("#input-engine-container") || document.querySelector("[class*='input-engine']") || document
+    : document;
+  const usableInput = (element) => visible(element)
+    && !element.disabled
+    && element.getAttribute("aria-disabled") !== "true"
+    && !element.readOnly;
+  const queryInput = (root) => inputSelectors
+    .flatMap((selector) => Array.from(root.querySelectorAll?.(selector) || []))
+    .find(usableInput);
+  let input = queryInput(composerRoot) || queryInput(document);
+  for (let attempt = 0; provider === "doubao" && !input && attempt < 16; attempt += 1) {
+    await sleep(250);
+    input = queryInput(composerRoot) || queryInput(document);
+  }
   if (!input) {
     return { ok: false, blocker: hasGate() ? "login-or-verification" : "input-not-found", reply: "" };
   }
 
   const beforeText = bodyText();
-  const beforeAssistantCount = uniqueVisibleElements(assistantSelectors).length;
-  input.focus({ preventScroll: true });
-  if ("value" in input) {
-    const descriptor = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")
-      || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
-    if (descriptor?.set) descriptor.set.call(input, prompt);
-    else input.value = prompt;
-    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: prompt, inputType: "insertText" }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-  } else {
-    const selection = window.getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(input);
-    range.deleteContents();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    document.execCommand("insertText", false, prompt);
-    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: prompt, inputType: "insertText" }));
+  const writePromptToInput = () => {
+    input.focus({ preventScroll: true });
+    if ("value" in input) {
+      const descriptor = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")
+        || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
+      if (descriptor?.set) descriptor.set.call(input, "");
+      else input.value = "";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: null, inputType: "deleteContentBackward" }));
+      if (descriptor?.set) descriptor.set.call(input, prompt);
+      else input.value = prompt;
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: prompt, inputType: "insertText" }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    } else {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      range.deleteContents();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      document.execCommand("insertText", false, prompt);
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: prompt, inputType: "insertText" }));
+    }
+  };
+  writePromptToInput();
+  await sleep(120);
+  const writtenText = String(input.innerText || input.value || "").trim();
+  if (provider === "doubao" && writtenText !== prompt.trim()) {
+    writePromptToInput();
+    await sleep(180);
   }
 
   await sleep(300);
-  const buttons = Array.from(document.querySelectorAll("button,[role='button']")).filter((element) => visible(element) && !element.disabled && element.getAttribute("aria-disabled") !== "true");
   const buttonLabel = (element) => [element.id, element.getAttribute("data-testid"), element.innerText, element.getAttribute("aria-label"), element.getAttribute("title")]
     .filter(Boolean).join(" ").toLowerCase();
   const isSendButton = (element) => {
@@ -959,11 +1024,53 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
       label.includes("send-button");
   };
   const form = input.closest("form");
-  const sendButton = Array.from(form?.querySelectorAll("button,[role='button']") || [])
-    .filter((element) => visible(element) && !element.disabled && element.getAttribute("aria-disabled") !== "true")
-    .find(isSendButton) ||
-    buttons.find(isSendButton) ||
-    document.querySelector("button[data-testid='send-button'],button[data-testid='composer-submit-button'],button[aria-label*='Send'],button[aria-label*='发送']");
+  const getRect = (element) => element.getBoundingClientRect();
+  const composerElement = provider === "doubao"
+    ? document.querySelector("#input-engine-container") || input.closest("[class*='input']") || input.parentElement || input
+    : form || input.closest("[class*='composer']") || input.parentElement || input;
+  const scanButtons = () => Array.from(document.querySelectorAll("button,[role='button']"))
+    .filter((element) => visible(element) && !element.disabled && element.getAttribute("aria-disabled") !== "true");
+  const findDoubaoSpatialSendButton = (buttonList) => provider === "doubao"
+    ? buttonList
+        .map((element) => {
+          const inputRect = getRect(input);
+          const rootRect = getRect(composerElement);
+          const rect = getRect(element);
+          const label = buttonLabel(element);
+          const text = String(element.innerText || "").trim();
+          const nearInputVertically = rect.top >= inputRect.top - 96 && rect.bottom <= inputRect.bottom + 132;
+          const nearComposerRight = rect.left >= Math.max(inputRect.left, rootRect.right - 120) && rect.right <= rootRect.right + 24;
+          const compactIconButton = rect.width <= 64 && rect.height <= 64 && element.querySelector("svg");
+          const forbidden = ["快速", "图像生成", "帮我写作", "编程", "更多", "语音", "麦克风", "voice", "microphone", "more"].some((word) => label.includes(word.toLowerCase()) || text.includes(word));
+          const explicitSend = isSendButton(element);
+          const score = (explicitSend ? 100 : 0)
+            + (nearInputVertically ? 20 : -80)
+            + (nearComposerRight ? 35 : -120)
+            + (compactIconButton ? 20 : -40)
+            + rect.left / 10000
+            - (forbidden ? 200 : 0)
+            - (text && !explicitSend ? 80 : 0);
+          return { element, score };
+        })
+        .filter((item) => item.score > 0)
+        .sort((left, right) => right.score - left.score)[0]?.element
+    : null;
+  const findSendButton = () => {
+    const buttonList = scanButtons();
+    const doubaoSpatialSendButton = findDoubaoSpatialSendButton(buttonList);
+    return Array.from(form?.querySelectorAll("button,[role='button']") || [])
+      .filter((element) => visible(element) && !element.disabled && element.getAttribute("aria-disabled") !== "true")
+      .find(isSendButton) ||
+      buttonList.find(isSendButton) ||
+      doubaoSpatialSendButton ||
+      document.querySelector("button[data-testid='send-button'],button[data-testid='composer-submit-button'],button[aria-label*='Send'],button[aria-label*='发送']");
+  };
+  let sendButton = null;
+  for (let attempt = 0; attempt < (provider === "doubao" ? 14 : 4); attempt += 1) {
+    sendButton = findSendButton();
+    if (sendButton && visible(sendButton) && !sendButton.disabled && sendButton.getAttribute("aria-disabled") !== "true") break;
+    await sleep(250);
+  }
 
   if (sendButton && visible(sendButton) && !sendButton.disabled && sendButton.getAttribute("aria-disabled") !== "true") {
     sendButton.click();
@@ -972,14 +1079,28 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
     input.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
   }
   await sleep(500);
+  if (provider === "chatgpt") getChatGptCurrentUserBlock();
+  if (provider === "doubao") getDoubaoCurrentUserRow();
 
-  const afterSubmitText = bodyText();
+  let afterSubmitText = bodyText();
+  if (afterSubmitText === beforeText && !bodyText().includes(prompt)) {
+    await sleep(provider === "doubao" ? 900 : 300);
+    sendButton = findSendButton();
+    if (sendButton && visible(sendButton) && !sendButton.disabled && sendButton.getAttribute("aria-disabled") !== "true") {
+      sendButton.click();
+    } else {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+      input.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+    }
+    await sleep(700);
+    afterSubmitText = bodyText();
+  }
   if (afterSubmitText === beforeText && !bodyText().includes(prompt)) {
     return { ok: false, blocker: "send-not-triggered", reply: "" };
   }
   const staleInputText = input.innerText || input.value || "";
   if (String(staleInputText).trim() === prompt.trim()) {
-    const retryButton = buttons.find(isSendButton);
+    const retryButton = findSendButton();
     if (retryButton && retryButton !== sendButton && visible(retryButton)) retryButton.click();
   }
 
@@ -987,31 +1108,44 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
     if (provider === "doubao") {
       const candidates = getDoubaoCandidateRows();
       for (let index = candidates.length - 1; index >= 0; index -= 1) {
-        const reply = cleanReply(getDoubaoReplyText(candidates[index]));
+        const reply = cleanReply(getDoubaoReplyText(candidates[index]), { stripPromptEcho: false });
         if (reply) return reply;
       }
-      const currentText = bodyText();
-      const changed = currentText.startsWith(beforeText) ? currentText.slice(beforeText.length) : "";
-      return cleanReply(changed);
+      return "";
     }
-    const anchoredChatGptReply = getChatGptAssistantAfterPrompt();
-    if (anchoredChatGptReply) return anchoredChatGptReply;
-    const assistantBlocks = uniqueVisibleElements(assistantSelectors);
-    const newBlocks = assistantBlocks.slice(Math.max(0, beforeAssistantCount));
-    const candidates = newBlocks;
-    for (let index = candidates.length - 1; index >= 0; index -= 1) {
-      const reply = cleanReply(candidates[index].innerText || candidates[index].textContent || "");
-      if (reply) return reply;
+    return getChatGptAssistantAfterPrompt();
+  };
+  const hasCurrentEmptyAssistantShell = () => {
+    if (provider === "doubao") {
+      const candidates = getDoubaoCandidateRows();
+      return candidates.length > 0 && candidates.every((row) => !cleanReply(getDoubaoReplyText(row), { stripPromptEcho: false }));
     }
-    return "";
+    const currentUserBlock = getChatGptCurrentUserBlock();
+    if (!currentUserBlock) return false;
+    const roleBlocks = getChatGptRoleBlocks();
+    const latestUserIndex = roleBlocks.indexOf(currentUserBlock);
+    if (latestUserIndex < 0) return false;
+    let assistantCount = 0;
+    for (let index = latestUserIndex + 1; index < roleBlocks.length; index += 1) {
+      const element = roleBlocks[index];
+      const role = element.getAttribute("data-message-author-role");
+      if (role === "user") break;
+      if (role !== "assistant") continue;
+      assistantCount += 1;
+      if (cleanReply(getElementText(element), { stripPromptEcho: false })) return false;
+    }
+    return assistantCount > 0;
   };
 
   let stableText = "";
   let stableCount = 0;
   const startedAt = Date.now();
-  while (Date.now() - startedAt < 70000) {
+  let firstReplyAt = 0;
+  const maxWaitMs = provider === "doubao" ? 45000 : 150000;
+  while (Date.now() - startedAt < maxWaitMs) {
     await sleep(800);
     const reply = getLatestAssistantReply();
+    if (reply && !firstReplyAt) firstReplyAt = Date.now();
     if (reply && reply === stableText) stableCount += 1;
     else {
       stableText = reply;
@@ -1021,7 +1155,21 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
       bodyText().includes("正在生成") ||
       bodyText().includes("生成中") ||
       Boolean(document.querySelector("button[data-testid='stop-button'],button[aria-label*='Stop'],button[aria-label*='停止'],button[aria-label*='正在']"));
-    if (stableCount >= 3 && !generating) break;
+    const waitedAfterFirstReply = firstReplyAt > 0 && Date.now() - firstReplyAt >= 2600;
+    if (stableText && stableCount >= 3 && waitedAfterFirstReply && !generating) {
+      await sleep(1800);
+      const verifiedReply = getLatestAssistantReply();
+      const verifiedGenerating = bodyText().includes("停止生成") ||
+        bodyText().includes("正在生成") ||
+        bodyText().includes("生成中") ||
+        Boolean(document.querySelector("button[data-testid='stop-button'],button[aria-label*='Stop'],button[aria-label*='停止'],button[aria-label*='正在']"));
+      if (verifiedReply && verifiedReply.length >= stableText.length) {
+        stableText = verifiedReply;
+      }
+      if (!verifiedGenerating) break;
+      stableCount = 1;
+    }
+    if (provider === "doubao" && !stableText && !generating && Date.now() - startedAt >= 12000 && hasCurrentEmptyAssistantShell()) break;
   }
 
   if (hasGate() && !stableText) {
@@ -1032,16 +1180,391 @@ function getAiChatAutomationExpression(provider: AiChatProvider, prompt: string)
 `;
 }
 
+function getChatGptSubmitExpression(prompt: string, requestId: string) {
+  return `
+(async () => {
+  const prompt = ${JSON.stringify(prompt)};
+  const requestId = ${JSON.stringify(requestId)};
+  const promptCompact = String(prompt || "").replace(/\\s+/g, "");
+  const inputSelectors = ["#prompt-textarea", "[contenteditable='true'][id='prompt-textarea']", "[contenteditable='true']", "textarea", "[role='textbox']"];
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const visible = (element) => {
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+  };
+  const gateWords = ["Log in", "Sign up", "登录", "注册", "验证", "captcha", "Cloudflare", "Checking your browser"];
+  const hasGate = () => gateWords.some((word) => (document.body?.innerText || "").includes(word));
+  const usableInput = (element) => visible(element)
+    && !element.disabled
+    && element.getAttribute("aria-disabled") !== "true"
+    && !element.readOnly;
+  const input = inputSelectors
+    .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+    .find(usableInput);
+  if (!input) return { ok: false, blocker: hasGate() ? "login-or-verification" : "input-not-found" };
+
+  const writePrompt = () => {
+    input.focus({ preventScroll: true });
+    if ("value" in input) {
+      const descriptor = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")
+        || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
+      if (descriptor?.set) descriptor.set.call(input, "");
+      else input.value = "";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: null, inputType: "deleteContentBackward" }));
+      if (descriptor?.set) descriptor.set.call(input, prompt);
+      else input.value = prompt;
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: prompt, inputType: "insertText" }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      return;
+    }
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(input);
+    range.deleteContents();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.execCommand("insertText", false, prompt);
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: prompt, inputType: "insertText" }));
+  };
+  writePrompt();
+  await sleep(250);
+
+  const buttonLabel = (element) => [element.id, element.getAttribute("data-testid"), element.innerText, element.getAttribute("aria-label"), element.getAttribute("title")]
+    .filter(Boolean).join(" ").toLowerCase();
+  const isSendButton = (element) => {
+    const label = buttonLabel(element);
+    return label.includes("send")
+      || label.includes("发送")
+      || label.includes("submit")
+      || label.includes("composer-submit-button")
+      || label.includes("send-button");
+  };
+  const form = input.closest("form");
+  const scanButtons = () => Array.from(document.querySelectorAll("button,[role='button']"))
+    .filter((element) => visible(element) && !element.disabled && element.getAttribute("aria-disabled") !== "true");
+  let sendButton = Array.from(form?.querySelectorAll("button,[role='button']") || [])
+    .filter((element) => visible(element) && !element.disabled && element.getAttribute("aria-disabled") !== "true")
+    .find(isSendButton)
+    || scanButtons().find(isSendButton)
+    || document.querySelector("button[data-testid='send-button'],button[data-testid='composer-submit-button'],button[aria-label*='Send'],button[aria-label*='发送']");
+  if (!sendButton || !visible(sendButton) || sendButton.disabled || sendButton.getAttribute("aria-disabled") === "true") {
+    return { ok: false, blocker: "send-button-not-found" };
+  }
+  const sendRect = sendButton.getBoundingClientRect();
+  return {
+    ok: true,
+    blocker: "",
+    sendPoint: {
+      x: sendRect.left + sendRect.width / 2,
+      y: sendRect.top + sendRect.height / 2
+    }
+  };
+})()
+`;
+}
+
+function getChatGptTagLatestUserExpression(prompt: string, requestId: string) {
+  return `
+(() => {
+  const prompt = ${JSON.stringify(prompt)};
+  const requestId = ${JSON.stringify(requestId)};
+  const promptCompact = String(prompt || "").replace(/\\s+/g, "");
+  const visible = (element) => {
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+  };
+  const sortByDocumentOrder = (elements) => elements.slice().sort((left, right) => {
+    if (left === right) return 0;
+    const position = left.compareDocumentPosition(right);
+    if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+    if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+    return 0;
+  });
+  const getText = (element) => element?.innerText || element?.textContent || "";
+  const userBlocks = sortByDocumentOrder(Array.from(document.querySelectorAll("[data-message-author-role='user']")).filter(visible));
+  for (let index = userBlocks.length - 1; index >= 0; index -= 1) {
+    const block = userBlocks[index];
+    const text = String(getText(block) || "").replace(/\\s+/g, "");
+    if (text && (text.includes(promptCompact) || promptCompact.includes(text))) {
+      block.setAttribute("data-aistudy-request-id", requestId);
+      return { ok: true, blocker: "", taggedText: getText(block) };
+    }
+  }
+  return { ok: false, blocker: (document.body?.innerText || "").includes(prompt) ? "request-not-tagged" : "send-not-triggered" };
+})()
+`;
+}
+
+function getChatGptReplyProbeExpression(requestId: string) {
+  return `
+(() => {
+  const requestId = ${JSON.stringify(requestId)};
+  const visible = (element) => {
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+  };
+  const sortByDocumentOrder = (elements) => elements.slice().sort((left, right) => {
+    if (left === right) return 0;
+    const position = left.compareDocumentPosition(right);
+    if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+    if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+    return 0;
+  });
+  const cleanReply = (text) => {
+    const lines = [];
+    for (const rawLine of String(text || "").replaceAll("\\r\\n", "\\n").replaceAll("\\r", "\\n").split("\\n")) {
+      const line = rawLine
+        .replace(/^ChatGPT\\s*说[:：]?\\s*/i, "")
+        .replace(/^ChatGPT\\s*[:：]?\\s*/i, "")
+        .replace(/^说[:：]?\\s*/i, "")
+        .trim();
+      if (!line) {
+        if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
+        continue;
+      }
+      if (/^(说|你|ChatGPT)[:：]?$/.test(line)) continue;
+      if (line === "New chat" || line === "新聊天" || line === "发送" || line === "停止生成" || line === "重新生成" || line === "Search" || line === "Reason" || line === "Canvas" || line === "来源") continue;
+      if (/^(展开|收起|重新回答|换一换|继续生成|已停止生成)$/.test(line)) continue;
+      if (line.includes("ChatGPT can make mistakes") || line.includes("ChatGPT 也可能会犯错")) continue;
+      lines.push(line);
+    }
+    return lines.join("\\n").replace(/\\n{3,}/g, "\\n\\n").trim();
+  };
+  const getText = (element) => element?.innerText || element?.textContent || "";
+  const readAssistantText = (element) => {
+    const contentRoots = Array.from(element.querySelectorAll(".markdown,.prose,[class*='markdown'],[class*='prose']"))
+      .filter(visible)
+      .map((node) => getText(node).trim())
+      .filter(Boolean)
+      .sort((left, right) => right.length - left.length);
+    return contentRoots[0] || getText(element);
+  };
+  const blocks = sortByDocumentOrder(Array.from(document.querySelectorAll("[data-message-author-role]")).filter(visible));
+  const taggedUser = blocks.find((element) => element.getAttribute("data-aistudy-request-id") === requestId);
+  const userIndex = blocks.indexOf(taggedUser);
+  const replies = [];
+  let assistantCount = 0;
+  if (userIndex >= 0) {
+    for (let index = userIndex + 1; index < blocks.length; index += 1) {
+      const block = blocks[index];
+      const role = block.getAttribute("data-message-author-role");
+      if (role === "user") break;
+      if (role !== "assistant") continue;
+      assistantCount += 1;
+      const reply = cleanReply(readAssistantText(block));
+      if (reply) replies.push(reply);
+    }
+  }
+  const bodyText = document.body?.innerText || "";
+  const generating = bodyText.includes("停止生成")
+    || bodyText.includes("正在生成")
+    || bodyText.includes("生成中")
+    || Boolean(document.querySelector("button[data-testid='stop-button'],button[aria-label*='Stop'],button[aria-label*='停止'],button[aria-label*='正在']"));
+  const gateWords = ["Log in", "Sign up", "登录", "注册", "验证", "captcha", "Cloudflare", "Checking your browser"];
+  const hasGate = gateWords.some((word) => bodyText.includes(word));
+  return {
+    ok: replies.length > 0,
+    blocker: hasGate ? "login-or-verification" : (userIndex < 0 ? "request-not-found" : ""),
+    reply: replies.join("\\n\\n").trim(),
+    generating,
+    assistantCount
+  };
+})()
+`;
+}
+
+function unwrapRuntimeEvaluationValue(result: Record<string, unknown> | null, pageName: string) {
+  const evaluation = result as { result?: { value?: unknown }; exceptionDetails?: { text?: string; exception?: { description?: string } } } | null;
+  if (evaluation?.exceptionDetails) {
+    throw new Error(evaluation.exceptionDetails.exception?.description || evaluation.exceptionDetails.text || `${pageName} 页面执行失败`);
+  }
+  return evaluation?.result?.value;
+}
+
+async function resetChatGptConversation(target: ChromeDebugTarget) {
+  await sendChromeCdpCommand(
+    target.webSocketDebuggerUrl!,
+    "Page.navigate",
+    { url: "https://chatgpt.com/" },
+    5000
+  );
+  await delay(2800);
+}
+
+async function dispatchChatGptMouseClick(target: ChromeDebugTarget, point: { x?: unknown; y?: unknown }) {
+  const x = typeof point.x === "number" ? point.x : 0;
+  const y = typeof point.y === "number" ? point.y : 0;
+  if (!x || !y) {
+    throw new Error("ChatGPT 发送按钮坐标无效");
+  }
+  await sendChromeCdpCommand(
+    target.webSocketDebuggerUrl!,
+    "Input.dispatchMouseEvent",
+    { type: "mouseMoved", x, y, button: "none" },
+    700
+  );
+  await sendChromeCdpCommand(
+    target.webSocketDebuggerUrl!,
+    "Input.dispatchMouseEvent",
+    { type: "mousePressed", x, y, button: "left", clickCount: 1 },
+    700
+  );
+  await sendChromeCdpCommand(
+    target.webSocketDebuggerUrl!,
+    "Input.dispatchMouseEvent",
+    { type: "mouseReleased", x, y, button: "left", clickCount: 1 },
+    700
+  );
+}
+
+type ChatGptReplyProbePayload = {
+  reply?: string;
+  blocker?: string;
+  generating?: boolean;
+  assistantCount?: number;
+};
+
+async function probeChatGptReply(target: ChromeDebugTarget, requestId: string): Promise<ChatGptReplyProbePayload> {
+  const probeResult = await sendChromeCdpCommand(
+    target.webSocketDebuggerUrl!,
+    "Runtime.evaluate",
+    {
+      expression: getChatGptReplyProbeExpression(requestId),
+      returnByValue: true,
+      timeout: 6000
+    },
+    8000
+  );
+  return (unwrapRuntimeEvaluationValue(probeResult, "ChatGPT") as ChatGptReplyProbePayload | undefined) ?? {};
+}
+
+async function verifySettledChatGptReply(target: ChromeDebugTarget, requestId: string, currentReply: string) {
+  let bestReply = currentReply;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await delay(2000);
+    const probePayload = await probeChatGptReply(target, requestId);
+    const nextReply = probePayload.reply?.trim() ?? "";
+    if (nextReply.length >= bestReply.length) {
+      bestReply = nextReply;
+    }
+    if (probePayload.generating) {
+      return { settled: false, reply: bestReply };
+    }
+  }
+  return { settled: true, reply: bestReply };
+}
+
+async function submitAndPollChatGpt(target: ChromeDebugTarget, prompt: string, requestId: string) {
+  const submitResult = await sendChromeCdpCommand(
+    target.webSocketDebuggerUrl!,
+    "Runtime.evaluate",
+    {
+      expression: getChatGptSubmitExpression(prompt, requestId),
+      awaitPromise: true,
+      returnByValue: true,
+      timeout: 12000
+    },
+    15000
+  );
+  const submitPayload = unwrapRuntimeEvaluationValue(submitResult, "ChatGPT") as { ok?: boolean; blocker?: string; sendPoint?: { x?: unknown; y?: unknown } } | undefined;
+  if (!submitPayload?.ok) {
+    if (submitPayload?.blocker === "login-or-verification") {
+      throw new Error("ChatGPT 需要登录或验证，请先在端口管理确认登录状态");
+    }
+    return { ok: false, blocker: submitPayload?.blocker || "send-failed", reply: "", deadShell: false };
+  }
+  await dispatchChatGptMouseClick(target, submitPayload.sendPoint ?? {});
+  await delay(1400);
+  const tagResult = await sendChromeCdpCommand(
+    target.webSocketDebuggerUrl!,
+    "Runtime.evaluate",
+    {
+      expression: getChatGptTagLatestUserExpression(prompt, requestId),
+      returnByValue: true,
+      timeout: 6000
+    },
+    8000
+  );
+  const tagPayload = unwrapRuntimeEvaluationValue(tagResult, "ChatGPT") as { ok?: boolean; blocker?: string } | undefined;
+  if (!tagPayload?.ok) {
+    return { ok: false, blocker: tagPayload?.blocker || "request-not-tagged", reply: "", deadShell: false };
+  }
+
+  let stableText = "";
+  let stableCount = 0;
+  let firstReplyAt = 0;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 150000) {
+    await delay(1000);
+    const probePayload = await probeChatGptReply(target, requestId);
+    const reply = probePayload?.reply?.trim() ?? "";
+    if (reply && !firstReplyAt) firstReplyAt = Date.now();
+    if (reply && reply === stableText) stableCount += 1;
+    else {
+      stableText = reply;
+      stableCount = reply ? 1 : 0;
+    }
+    if (probePayload?.blocker === "login-or-verification" && !stableText) {
+      throw new Error("ChatGPT 需要登录或验证，请先在端口管理确认登录状态");
+    }
+    if (!stableText && !probePayload?.generating && (probePayload?.assistantCount ?? 0) > 0 && Date.now() - startedAt >= 25000) {
+      return { ok: false, blocker: "empty-assistant-shell", reply: "", deadShell: true };
+    }
+    const waitedAfterFirstReply = firstReplyAt > 0 && Date.now() - firstReplyAt >= 3200;
+    if (stableText && stableCount >= 3 && waitedAfterFirstReply && !probePayload?.generating) {
+      const verified = await verifySettledChatGptReply(target, requestId, stableText);
+      if (verified.reply.length > stableText.length) {
+        stableText = verified.reply;
+      }
+      if (!verified.settled) {
+        stableCount = 1;
+        continue;
+      }
+      return { ok: true, blocker: "", reply: stableText, deadShell: false };
+    }
+  }
+
+  return { ok: false, blocker: "reply-timeout", reply: "", deadShell: false };
+}
+
+async function sendChatGptAiChat(target: ChromeDebugTarget, prompt: string, requestId: string): Promise<AiChatResult> {
+  const firstAttempt = await submitAndPollChatGpt(target, prompt, requestId);
+  if (firstAttempt.ok && firstAttempt.reply) {
+    return { ok: true, provider: "chatgpt", reply: firstAttempt.reply };
+  }
+
+  if (firstAttempt.deadShell) {
+    await resetChatGptConversation(target);
+    const retryAttempt = await submitAndPollChatGpt(target, prompt, randomUUID());
+    if (retryAttempt.ok && retryAttempt.reply) {
+      return { ok: true, provider: "chatgpt", reply: retryAttempt.reply };
+    }
+    throw new Error(retryAttempt.blocker ? `ChatGPT 未返回结果：${retryAttempt.blocker}` : "ChatGPT 未返回结果");
+  }
+
+  throw new Error(firstAttempt.blocker ? `ChatGPT 未返回结果：${firstAttempt.blocker}` : "ChatGPT 未返回结果");
+}
+
 async function sendAiChat(rawRequest: unknown): Promise<AiChatResult> {
   const request = sanitizeAiChatRequest(rawRequest);
   const platform = getAiChatPlatform(request.provider);
   const target = await getAiChatPageTarget(platform);
   const prompt = buildAiChatPrompt(request);
+  const requestId = randomUUID();
+  if (request.provider === "chatgpt") {
+    return await sendChatGptAiChat(target, prompt, requestId);
+  }
   const result = await sendChromeCdpCommand(
     target.webSocketDebuggerUrl!,
     "Runtime.evaluate",
     {
-      expression: getAiChatAutomationExpression(request.provider, prompt),
+      expression: getAiChatAutomationExpression(request.provider, prompt, requestId),
       awaitPromise: true,
       returnByValue: true,
       timeout: 90000
