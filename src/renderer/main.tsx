@@ -1,25 +1,25 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import {
+  AlertCircle,
   Bot,
   Check,
   CheckCircle2,
   Download,
-  Edit3,
   ExternalLink,
   FileText,
   Folder,
   GitBranch,
   Globe2,
-  Plus,
   RefreshCw,
-  Search,
   Settings,
-  Trash2,
   X
 } from "lucide-react";
 import { AiAssistantPanel } from "./features/assistant/AiAssistantPanel";
 import { ChromePortManager } from "./features/chromePorts/ChromePortManager";
+import { CourseSidebar } from "./features/course/CourseSidebar";
+import { courseApi } from "./features/course/courseService";
+import type { Course, CourseSection, CourseStore, CourseSyncStatus } from "./features/course/courseTypes";
 import { MindMapCatalog } from "./features/mindmap/MindMapCatalog";
 import {
   MindMapWorkspace,
@@ -31,19 +31,6 @@ import type { MindMapOutlineItem, MindMapSelectedNode } from "./features/mindmap
 import { startCoreFeatureWarmup } from "./lib/performanceWarmup";
 import { drainBeforeCloseSaves } from "./lib/saveDrain";
 import "./styles.css";
-
-type Course = {
-  id: string;
-  name: string;
-  description: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-type CourseStore = {
-  courses: Course[];
-  activeCourseId: string | null;
-};
 
 declare global {
   interface Window {
@@ -85,6 +72,40 @@ type UpdateDownloadResult = {
   fileSize: number;
 };
 
+type ErrorLogEntry = {
+  id: string;
+  source: string;
+  userMessage: string;
+  errorCode: string;
+  domain: string;
+  reason: string;
+  action: string;
+  retryable: boolean;
+  createdAt: string;
+};
+
+type RuntimeDiagnosticStatus = "ok" | "warning" | "error" | "disabled";
+
+type RuntimeDiagnosticItem = {
+  id: string;
+  name: string;
+  status: RuntimeDiagnosticStatus;
+  message: string;
+  action: string;
+  retryable: boolean;
+};
+
+type RuntimeDiagnosticResult = {
+  checkedAt: string;
+  summary: {
+    ok: number;
+    warning: number;
+    error: number;
+    disabled: number;
+  };
+  items: RuntimeDiagnosticItem[];
+};
+
 type AppErrorBoundaryState = {
   error: Error | null;
 };
@@ -101,7 +122,7 @@ class AppErrorBoundary extends React.Component<React.PropsWithChildren, AppError
       return (
         <div className="app-error-fallback" role="alert">
           <strong>应用运行异常</strong>
-          <span>{this.state.error.message || "页面渲染失败"}</span>
+          <span>页面暂时没有正常打开，可以先重新载入；详细信息会记录到报错日志。</span>
           <button type="button" onClick={() => window.location.reload()}>
             重新载入
           </button>
@@ -115,13 +136,10 @@ class AppErrorBoundary extends React.Component<React.PropsWithChildren, AppError
 
 type CourseDialogMode = "create" | "edit";
 type AppSection = "knowledge" | "assistant" | "chromePorts";
+type SettingsPage = "runtime" | "updates" | "errorLogs";
 
 declare global {
   interface Window {
-    aistudyCourses?: {
-      load: () => Promise<CourseStore>;
-      save: (store: CourseStore) => Promise<CourseStore>;
-    };
     aistudyUpdates?: {
       loadInfo: () => Promise<UpdateManagerInfo>;
       check: () => Promise<UpdateCheckResult>;
@@ -129,14 +147,14 @@ declare global {
       install: (filePath: string) => Promise<boolean>;
       openReleasePage: (releaseUrl: string) => Promise<boolean>;
     };
+    aistudyErrorLogs?: {
+      list: (limit?: number) => Promise<ErrorLogEntry[]>;
+    };
+    aistudyRuntime?: {
+      diagnose: () => Promise<RuntimeDiagnosticResult>;
+      openDataRoot: () => Promise<boolean>;
+    };
   }
-}
-
-function createId() {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
-  }
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function formatFileSize(size: number) {
@@ -152,18 +170,18 @@ function formatDate(value: string) {
   return date.toLocaleDateString();
 }
 
-async function loadCourseStore() {
-  if (window.aistudyCourses) {
-    return window.aistudyCourses.load();
-  }
-  throw new Error("课程服务不可用。");
+function formatDateTime(value: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString();
 }
 
-async function saveCourseStore(store: CourseStore) {
-  if (window.aistudyCourses) {
-    return window.aistudyCourses.save(store);
-  }
-  throw new Error("课程服务不可用。");
+function getDiagnosticStatusText(status: RuntimeDiagnosticStatus) {
+  if (status === "ok") return "正常";
+  if (status === "warning") return "需关注";
+  if (status === "error") return "不可用";
+  return "未启用";
 }
 
 async function loadUpdateInfo() {
@@ -174,9 +192,16 @@ async function loadUpdateInfo() {
 }
 
 function SettingsDialog({ onClose }: { onClose: () => void }) {
+  const [activePage, setActivePage] = React.useState<SettingsPage>("runtime");
   const [updateInfo, setUpdateInfo] = React.useState<UpdateManagerInfo | null>(null);
   const [checkResult, setCheckResult] = React.useState<UpdateCheckResult | null>(null);
   const [downloadResult, setDownloadResult] = React.useState<UpdateDownloadResult | null>(null);
+  const [diagnosticResult, setDiagnosticResult] = React.useState<RuntimeDiagnosticResult | null>(null);
+  const [isCheckingRuntime, setIsCheckingRuntime] = React.useState(false);
+  const [runtimeMessage, setRuntimeMessage] = React.useState("");
+  const [errorLogs, setErrorLogs] = React.useState<ErrorLogEntry[]>([]);
+  const [isLoadingErrorLogs, setIsLoadingErrorLogs] = React.useState(false);
+  const [errorLogMessage, setErrorLogMessage] = React.useState("");
   const [status, setStatus] = React.useState("");
   const [error, setError] = React.useState("");
   const [isChecking, setIsChecking] = React.useState(false);
@@ -193,6 +218,59 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
         setError(loadError instanceof Error ? loadError.message : "更新服务初始化失败。");
       });
   }, []);
+
+  const runRuntimeDiagnostics = React.useCallback(() => {
+    if (!window.aistudyRuntime) {
+      setRuntimeMessage("环境检查暂时不可用。");
+      return;
+    }
+
+    setIsCheckingRuntime(true);
+    setRuntimeMessage("");
+    window.aistudyRuntime.diagnose()
+      .then((result) => {
+        setDiagnosticResult(result);
+        const issueCount = result.summary.warning + result.summary.error;
+        setRuntimeMessage(issueCount > 0 ? `检查完成，有 ${issueCount} 项需要关注。` : "检查完成，关键环境正常。");
+      })
+      .catch(() => {
+        setDiagnosticResult(null);
+        setRuntimeMessage("环境检查没有完成，请稍后再试。");
+      })
+      .finally(() => setIsCheckingRuntime(false));
+  }, []);
+
+  React.useEffect(() => {
+    if (activePage === "runtime" && !diagnosticResult && !isCheckingRuntime) {
+      runRuntimeDiagnostics();
+    }
+  }, [activePage, diagnosticResult, isCheckingRuntime, runRuntimeDiagnostics]);
+
+  const loadErrorLogs = React.useCallback(() => {
+    if (!window.aistudyErrorLogs) {
+      setErrorLogMessage("报错日志暂时不可用。");
+      return;
+    }
+
+    setIsLoadingErrorLogs(true);
+    setErrorLogMessage("");
+    window.aistudyErrorLogs.list(50)
+      .then((logs) => {
+        setErrorLogs(logs);
+        setErrorLogMessage(logs.length ? "" : "暂无报错记录。");
+      })
+      .catch(() => {
+        setErrorLogs([]);
+        setErrorLogMessage("报错日志暂时无法读取，请稍后再试。");
+      })
+      .finally(() => setIsLoadingErrorLogs(false));
+  }, []);
+
+  React.useEffect(() => {
+    if (activePage === "errorLogs") {
+      loadErrorLogs();
+    }
+  }, [activePage, loadErrorLogs]);
 
   const checkUpdate = React.useCallback(() => {
     if (!window.aistudyUpdates) return;
@@ -253,6 +331,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
     ? `已下载 ${downloadResult.fileName}${downloadResult.fileSize ? `（${formatFileSize(downloadResult.fileSize)}）` : ""}`
     : (checkResult?.hasUpdate ? "获取最新安装包，下载完成后可安装。" : "检测到可更新版本后可用。");
   const installDescription = downloadResult ? "启动安装程序并退出当前应用。" : "安装包下载完成后可用。";
+  const settingsPageTitle = activePage === "runtime" ? "环境检查" : activePage === "updates" ? "更新管理" : "报错日志";
 
   return (
     <div className="settings-backdrop" role="presentation">
@@ -262,22 +341,91 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
             <Settings size={18} />
             <span>设置</span>
           </div>
-          <button className="settings-nav-item active" type="button">
+          <button className={activePage === "runtime" ? "settings-nav-item active" : "settings-nav-item"} type="button" onClick={() => setActivePage("runtime")}>
+            <CheckCircle2 size={16} />
+            <span>环境检查</span>
+          </button>
+          <button className={activePage === "updates" ? "settings-nav-item active" : "settings-nav-item"} type="button" onClick={() => setActivePage("updates")}>
             <GitBranch size={16} />
             <span>更新管理</span>
+          </button>
+          <button className={activePage === "errorLogs" ? "settings-nav-item active" : "settings-nav-item"} type="button" onClick={() => setActivePage("errorLogs")}>
+            <AlertCircle size={16} />
+            <span>报错日志</span>
           </button>
         </aside>
 
         <main className="settings-content">
           <header className="settings-header">
             <div>
-              <h2 className="settings-page-title">更新管理</h2>
+              <h2 className="settings-page-title">{settingsPageTitle}</h2>
             </div>
             <button className="icon-button" title="关闭" aria-label="关闭设置" type="button" onClick={onClose}>
               <X size={17} />
             </button>
           </header>
 
+          {activePage === "runtime" ? (
+            <div className="runtime-check-panel">
+              <section className="settings-section runtime-check-intro">
+                <div className="settings-section-heading">
+                  <div>
+                    <h3>一键检查新机器运行环境</h3>
+                    <p>检查数据目录、数据库、Chrome、AI 端口和更新服务。缺少的能力只会提示处理方式，不影响核心编辑区打开。</p>
+                  </div>
+                  <div className="runtime-check-actions">
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={() => void window.aistudyRuntime?.openDataRoot?.()}
+                    >
+                      <Folder size={15} />
+                      数据目录
+                    </button>
+                    <button className="primary-button" type="button" onClick={runRuntimeDiagnostics} disabled={isCheckingRuntime}>
+                      <RefreshCw size={15} />
+                      {isCheckingRuntime ? "检查中" : "一键检查"}
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              {runtimeMessage ? <p className="update-status">{runtimeMessage}</p> : null}
+
+              {diagnosticResult ? (
+                <>
+                  <section className="runtime-summary" aria-label="环境检查汇总">
+                    <span><strong>{diagnosticResult.summary.ok}</strong> 正常</span>
+                    <span><strong>{diagnosticResult.summary.warning}</strong> 需关注</span>
+                    <span><strong>{diagnosticResult.summary.error}</strong> 不可用</span>
+                    <span><strong>{diagnosticResult.summary.disabled}</strong> 未启用</span>
+                  </section>
+
+                  <div className="runtime-check-list" aria-label="环境检查结果">
+                    {diagnosticResult.items.map((item) => (
+                      <article className={`runtime-check-item ${item.status}`} key={item.id}>
+                        <div className="runtime-check-state" aria-hidden="true">
+                          {item.status === "ok" ? <CheckCircle2 size={18} /> : item.status === "error" ? <AlertCircle size={18} /> : <RefreshCw size={18} />}
+                        </div>
+                        <div className="runtime-check-copy">
+                          <div className="runtime-check-title">
+                            <strong>{item.name}</strong>
+                            <span>{getDiagnosticStatusText(item.status)}</span>
+                          </div>
+                          <p>{item.message}</p>
+                          <em>{item.action}</em>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="pane-empty-state runtime-empty-state">
+                  <strong>{isCheckingRuntime ? "正在检查环境" : "点击一键检查"}</strong>
+                </div>
+              )}
+            </div>
+          ) : activePage === "updates" ? (
           <div className="update-panel">
             <section className={`windows-update-hero ${updateStateClass}`}>
               <div className="windows-update-main">
@@ -370,6 +518,49 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
               </button>
             </section>
           </div>
+          ) : (
+          <div className="error-log-panel">
+            <section className="settings-section error-log-intro">
+              <div className="settings-section-heading">
+                <div>
+                  <h3>最近的报错记录</h3>
+                  <p>这里会记录操作失败的时间和位置，方便后续排查；页面不会展示代码细节。</p>
+                </div>
+                <button className="secondary-button" type="button" onClick={loadErrorLogs} disabled={isLoadingErrorLogs}>
+                  <RefreshCw size={15} />
+                  {isLoadingErrorLogs ? "读取中" : "刷新"}
+                </button>
+              </div>
+            </section>
+
+            {errorLogMessage ? <p className="update-status">{errorLogMessage}</p> : null}
+
+            {errorLogs.length ? (
+              <div className="error-log-list" aria-label="报错日志列表">
+                {errorLogs.map((log) => (
+                  <article className="error-log-item" key={log.id}>
+                    <div className="error-log-main">
+                      <strong>{log.userMessage || "有一个操作没有完成"}</strong>
+                      <span>{formatDateTime(log.createdAt)}</span>
+                    </div>
+                    <div className="error-log-meta">
+                      <span>{log.source}</span>
+                      <span>编号 {log.errorCode || log.id.slice(0, 8)}</span>
+                      {log.retryable ? <span>可重试</span> : <span>需处理</span>}
+                    </div>
+                    {log.reason || log.action ? (
+                      <p className="error-log-detail">
+                        {log.reason ? `原因：${log.reason}` : ""}
+                        {log.reason && log.action ? " " : ""}
+                        {log.action ? `建议：${log.action}` : ""}
+                      </p>
+                    ) : null}
+                  </article>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          )}
         </main>
       </section>
     </div>
@@ -378,13 +569,14 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
 
 function App() {
   const [courses, setCourses] = React.useState<Course[]>([]);
+  const [courseSections, setCourseSections] = React.useState<CourseSection[]>([]);
   const [activeCourseId, setActiveCourseId] = React.useState<string | null>(null);
   const [isHydrated, setIsHydrated] = React.useState(false);
   const [hasLoadedCourseStore, setHasLoadedCourseStore] = React.useState(false);
-  const [storageError, setStorageError] = React.useState("");
-  const [searchQuery, setSearchQuery] = React.useState("");
+  const [courseSyncStatus, setCourseSyncStatus] = React.useState<CourseSyncStatus>({ state: "saved", pendingCount: 0 });
   const [dialogMode, setDialogMode] = React.useState<CourseDialogMode | null>(null);
   const [editingCourseId, setEditingCourseId] = React.useState<string | null>(null);
+  const [creatingCourseSectionId, setCreatingCourseSectionId] = React.useState<string | null>(null);
   const [draftName, setDraftName] = React.useState("");
   const [draftDescription, setDraftDescription] = React.useState("");
   const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
@@ -401,20 +593,46 @@ function App() {
 
   React.useEffect(() => startCoreFeatureWarmup(), []);
 
+  function applyCourseStore(store: CourseStore) {
+    setCourseSections(store.sections ?? []);
+    setCourses(store.courses);
+    setActiveCourseId(store.activeCourseId);
+    setHasLoadedCourseStore(true);
+  }
+
+  async function refreshCourseSyncStatus() {
+    try {
+      setCourseSyncStatus(await courseApi.syncStatus());
+    } catch {
+      setCourseSyncStatus({ state: "attention", pendingCount: 1 });
+    }
+  }
+
+  async function runCourseStoreCommand(command: () => Promise<CourseStore>) {
+    setCourseSyncStatus((current) => ({ ...current, state: "saving" }));
+    try {
+      const store = await command();
+      applyCourseStore(store);
+      await refreshCourseSyncStatus();
+      return store;
+    } catch (error) {
+      await refreshCourseSyncStatus();
+      throw error;
+    }
+  }
+
   React.useEffect(() => {
     let isCancelled = false;
 
-    loadCourseStore()
+    courseApi.load()
       .then((store) => {
         if (isCancelled) return;
-        setCourses(store.courses);
-        setActiveCourseId(store.activeCourseId);
-        setHasLoadedCourseStore(true);
-        setStorageError("");
+        applyCourseStore(store);
+        void refreshCourseSyncStatus();
       })
       .catch(() => {
         if (isCancelled) return;
-        setStorageError("课程读取失败。");
+        setCourseSyncStatus({ state: "attention", pendingCount: 1 });
       })
       .finally(() => {
         if (!isCancelled) {
@@ -427,13 +645,16 @@ function App() {
     };
   }, []);
 
-  React.useEffect(() => {
-    if (!isHydrated || !hasLoadedCourseStore) return;
-    const store = { courses, activeCourseId };
-    saveCourseStore(store)
-      .then(() => setStorageError(""))
-      .catch(() => setStorageError("课程数据保存失败，请稍后重试。"));
-  }, [activeCourseId, courses, hasLoadedCourseStore, isHydrated]);
+  async function retryCourseSync() {
+    setCourseSyncStatus((current) => ({ ...current, state: "saving" }));
+    try {
+      const store = await courseApi.load();
+      applyCourseStore(store);
+      await refreshCourseSyncStatus();
+    } catch {
+      setCourseSyncStatus((current) => ({ state: "attention", pendingCount: Math.max(current.pendingCount, 1) }));
+    }
+  }
 
   React.useEffect(() => {
     if (activeCourseId && !courses.some((course) => course.id === activeCourseId)) {
@@ -450,21 +671,13 @@ function App() {
   }, [activeCourseId]);
 
   const activeCourse = courses.find((course) => course.id === activeCourseId) ?? null;
-  const normalizedQuery = searchQuery.trim().toLowerCase();
-  const visibleCourses = React.useMemo(
-    () =>
-      normalizedQuery
-        ? courses.filter((course) => {
-            const haystack = `${course.name} ${course.description}`.toLowerCase();
-            return haystack.includes(normalizedQuery);
-          })
-        : courses,
-    [courses, normalizedQuery]
-  );
+  const sectionIds = React.useMemo(() => new Set(courseSections.map((section) => section.id)), [courseSections]);
 
-  function openCreateDialog() {
+  function openCreateDialog(sectionId: string | null = activeCourse?.sectionId ?? null) {
+    const validSectionId = sectionId && sectionIds.has(sectionId) ? sectionId : null;
     setDialogMode("create");
     setEditingCourseId(null);
+    setCreatingCourseSectionId(validSectionId);
     setDraftName("");
     setDraftDescription("");
   }
@@ -479,8 +692,44 @@ function App() {
   function closeDialog() {
     setDialogMode(null);
     setEditingCourseId(null);
+    setCreatingCourseSectionId(null);
     setDraftName("");
     setDraftDescription("");
+  }
+
+  async function createCourseSection(name: string) {
+    await runCourseStoreCommand(() => courseApi.createSection(name));
+  }
+
+  async function renameCourseSection(sectionId: string, name: string) {
+    await runCourseStoreCommand(() => courseApi.renameSection(sectionId, name));
+  }
+
+  function toggleCourseSection(sectionId: string, collapsed: boolean) {
+    void runCourseStoreCommand(() => courseApi.toggleSection(sectionId, collapsed));
+  }
+
+  function deleteCourseSection(section: CourseSection) {
+    const affectedCount = courses.filter((course) => course.sectionId === section.id).length;
+    const confirmed = window.confirm(
+      affectedCount > 0
+        ? `确定删除分区「${section.name}」吗？其中 ${affectedCount} 个知识库会移回「未分区」，知识库内容不会删除。`
+        : `确定删除分区「${section.name}」吗？`
+    );
+    if (!confirmed) return;
+    void runCourseStoreCommand(() => courseApi.deleteSection(section.id));
+  }
+
+  function moveCourseToSection(course: Course, sectionId: string | null) {
+    void runCourseStoreCommand(() => courseApi.moveCourse({ id: course.id, sectionId }));
+  }
+
+  function reorderCourse(courseId: string, sectionId: string | null, beforeCourseId: string | null) {
+    void runCourseStoreCommand(() => courseApi.reorderCourse({ id: courseId, sectionId, beforeCourseId }));
+  }
+
+  function reorderCourseSection(sectionId: string, beforeSectionId: string | null) {
+    void runCourseStoreCommand(() => courseApi.reorderSection(sectionId, beforeSectionId));
   }
 
   const saveCourse: React.ComponentProps<"form">["onSubmit"] = (event) => {
@@ -490,45 +739,24 @@ function App() {
     if (!name) return;
 
     if (dialogMode === "create") {
-      const now = new Date().toISOString();
-      const course: Course = {
-        id: createId(),
-        name,
-        description,
-        createdAt: now,
-        updatedAt: now
-      };
-      setCourses((current) => [course, ...current]);
-      setActiveCourseId(course.id);
-      closeDialog();
+      const targetSectionId = creatingCourseSectionId && sectionIds.has(creatingCourseSectionId) ? creatingCourseSectionId : null;
+      void runCourseStoreCommand(() => courseApi.createCourse({ name, description, sectionId: targetSectionId })).then(closeDialog);
       return;
     }
 
     if (dialogMode === "edit" && editingCourseId) {
-      setCourses((current) =>
-        current.map((course) =>
-          course.id === editingCourseId
-            ? {
-                ...course,
-                name,
-                description,
-                updatedAt: new Date().toISOString()
-              }
-            : course
-        )
-      );
-      closeDialog();
+      void runCourseStoreCommand(() => courseApi.renameCourse({ id: editingCourseId, name, description })).then(closeDialog);
     }
   };
 
   function deleteCourse(course: Course) {
     const confirmed = window.confirm(`确定删除课程「${course.name}」吗？删除后该课程会从列表中移除。`);
     if (!confirmed) return;
-    setCourses((current) => current.filter((item) => item.id !== course.id));
-    if (activeCourseId === course.id) {
-      const nextCourse = courses.find((item) => item.id !== course.id);
-      setActiveCourseId(nextCourse?.id ?? null);
-    }
+    void runCourseStoreCommand(() => courseApi.deleteCourse(course.id));
+  }
+
+  function selectCourse(courseId: string) {
+    void runCourseStoreCommand(() => courseApi.selectCourse(courseId));
   }
 
   function requestWorkspaceMode(mode: WorkspaceEditorMode) {
@@ -586,59 +814,25 @@ function App() {
 
       {activeSection === "knowledge" ? (
       <main className="study-layout">
-        <section className="library-pane" aria-label="课程列表">
-          <div className="pane-heading">
-            <div>
-              <p className="section-kicker">知识库</p>
-              <h1>知识库</h1>
-            </div>
-            <button className="icon-button primary-action" title="新建课程" aria-label="新建课程" type="button" onClick={openCreateDialog}>
-              <Plus size={17} strokeWidth={2.1} />
-            </button>
-          </div>
-
-          <label className="search-box" aria-label="搜索课程">
-            <Search size={16} />
-            <input
-              type="search"
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="搜索课程"
-              aria-label="搜索课程"
-            />
-          </label>
-
-          {courses.length === 0 ? (
-            <div className="pane-empty-state">
-              <strong>{isHydrated ? "暂无课程" : "正在读取课程"}</strong>
-            </div>
-          ) : visibleCourses.length === 0 ? (
-            <div className="pane-empty-state">
-              <strong>没有匹配课程</strong>
-            </div>
-          ) : (
-            <div className="course-list" aria-label="课程">
-              {visibleCourses.map((course) => (
-                <article key={course.id} className={activeCourseId === course.id ? "course-card selected" : "course-card"}>
-                  <button className="course-main" type="button" onClick={() => setActiveCourseId(course.id)}>
-                    <span className="course-name">{course.name}</span>
-                    <span className="course-meta">{course.description || "未填写描述"}</span>
-                  </button>
-                  <div className="course-actions" aria-label={`${course.name} 操作`}>
-                    <button className="mini-button" type="button" title="重命名课程" aria-label={`重命名 ${course.name}`} onClick={() => openEditDialog(course)}>
-                      <Edit3 size={14} />
-                    </button>
-                    <button className="mini-button danger" type="button" title="删除课程" aria-label={`删除 ${course.name}`} onClick={() => deleteCourse(course)}>
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          )}
-
-          {storageError ? <p className="status-message error">{storageError}</p> : null}
-        </section>
+        <CourseSidebar
+          sections={courseSections}
+          courses={courses}
+          activeCourseId={activeCourseId}
+          isHydrated={isHydrated}
+          syncStatus={courseSyncStatus}
+          onRetrySync={() => void retryCourseSync()}
+          onSelectCourse={selectCourse}
+          onCreateCourse={openCreateDialog}
+          onEditCourse={openEditDialog}
+          onDeleteCourse={deleteCourse}
+          onCreateSection={createCourseSection}
+          onRenameSection={renameCourseSection}
+          onToggleSection={toggleCourseSection}
+          onDeleteSection={deleteCourseSection}
+          onMoveCourse={moveCourseToSection}
+          onReorderCourse={reorderCourse}
+          onReorderSection={reorderCourseSection}
+        />
 
         <section className="canvas-pane" aria-label="学习工作台">
           <div className="canvas-toolbar">

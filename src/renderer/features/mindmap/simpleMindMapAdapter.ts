@@ -1,8 +1,10 @@
+import { AISTUDY_CORE_CONTRACT } from "../../domain/coreContracts";
 import {
   createXMindStyleThemeConfig,
   extractNodeId,
   extractNodeTitle,
   MIND_MAP_DEFAULT_FONT_SIZE,
+  MIND_MAP_EDITOR_VERSION,
   normalizeLayout,
   normalizeMindMapTree
 } from "./mindMapSnapshot";
@@ -166,9 +168,9 @@ function toSnapshot(editor: any): MindMapSnapshot {
   const layout = normalizeLayout(data.layout);
 
   return {
-    schemaVersion: 1,
-    editor: "simple-mind-map",
-    editorVersion: "0.14.0-fix.2",
+    schemaVersion: AISTUDY_CORE_CONTRACT.schemaVersion,
+    editor: AISTUDY_CORE_CONTRACT.editors.mindMap,
+    editorVersion: MIND_MAP_EDITOR_VERSION,
     root: normalizeMindMapTree(root),
     layout,
     theme: {

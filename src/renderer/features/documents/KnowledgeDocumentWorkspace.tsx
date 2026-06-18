@@ -1,7 +1,8 @@
 import React from "react";
-import { Bold, Bot, ChevronLeft, ChevronRight, Italic, Paintbrush, Redo2, Save, SkipForward, Type, Underline, Undo2 } from "lucide-react";
+import { Bold, Bot, ChevronLeft, ChevronRight, Italic, Paintbrush, Redo2, Save, SkipForward, Type, Underline, Undo2, Upload } from "lucide-react";
 import { createCanvasDocumentEditor, createEmptyKnowledgeDocumentSnapshot } from "./canvasEditorAdapter";
 import { AiAssistantPanel } from "../assistant/AiAssistantPanel";
+import { ImporterDialog } from "../importer/ImporterDialog";
 import { createKnowledgeDocumentBinding } from "../../domain/coreContracts";
 import { registerBeforeCloseSave } from "../../lib/saveDrain";
 import { readLocalSnapshot, writeLocalSnapshot } from "../../lib/localSnapshotStore";
@@ -305,6 +306,7 @@ export function KnowledgeDocumentWorkspace({
   const [aiContextMenu, setAiContextMenu] = React.useState<AiContextMenuState | null>(null);
   const [skipBlankPages, setSkipBlankPages] = React.useState(false);
   const [isNavigatingDocument, setIsNavigatingDocument] = React.useState(false);
+  const [isImporterOpen, setIsImporterOpen] = React.useState(false);
 
   const documentBinding = React.useMemo(
     () => createKnowledgeDocumentBinding(courseId, mindMapId, selectedNode.id),
@@ -637,6 +639,26 @@ export function KnowledgeDocumentWorkspace({
       saveTimerRef.current = window.setTimeout(() => flushPendingSave(false), SAVE_DEBOUNCE_MS);
     },
     [documentBinding, flushPendingSave, selectedNode.title]
+  );
+
+  const importDocumentSnapshot = React.useCallback(
+    async (nextSnapshot: KnowledgeDocumentSnapshot) => {
+      if (!documentBinding) return;
+      editorRef.current?.destroy();
+      editorRef.current = null;
+      mountRef.current?.replaceChildren();
+      setIsEditorReady(false);
+      setSnapshot(nextSnapshot);
+      latestSnapshotRef.current = nextSnapshot;
+      await persistDocument({
+        ...documentBinding,
+        title: selectedNode.title || "未命名",
+        snapshot: nextSnapshot
+      });
+      setSavedAt(formatSavedAt());
+      setError("");
+    },
+    [documentBinding, persistDocument, selectedNode.title]
   );
 
   React.useEffect(() => {
@@ -1255,6 +1277,10 @@ export function KnowledgeDocumentWorkspace({
           <Bot size={15} />
           <span>AI</span>
         </button>
+        <button type="button" title="导入文档" onClick={() => setIsImporterOpen(true)} disabled={!canUseDocument || isSaving}>
+          <Upload size={15} />
+          <span>导入</span>
+        </button>
         <button type="button" title="保存文档" onClick={saveNow} disabled={!canUseDocument || isSaving}>
           <Save size={15} />
           <span>{isSaving ? "保存中" : "保存"}</span>
@@ -1303,6 +1329,19 @@ export function KnowledgeDocumentWorkspace({
             onPointerDown={startAssistantPanelResize}
           />
         </div>
+      ) : null}
+
+      {isImporterOpen && documentBinding ? (
+        <ImporterDialog
+          target={{
+            courseId: documentBinding.courseId,
+            mindMapId: documentBinding.mindMapId,
+            nodeId: documentBinding.nodeId,
+            title: selectedNode.title || "当前节点"
+          }}
+          onClose={() => setIsImporterOpen(false)}
+          onCommit={importDocumentSnapshot}
+        />
       ) : null}
 
       <div className="document-status-strip">

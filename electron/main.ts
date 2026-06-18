@@ -9,6 +9,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { AISTUDY_CORE_CONTRACT } from "./coreContract.js";
+import { classifyAppError, createAppError, getAppErrorDefinition } from "./appErrors.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
@@ -16,19 +17,123 @@ const execFileAsync = promisify(execFile);
 const MIND_MAP_SNAPSHOT_RETENTION_LIMIT = AISTUDY_CORE_CONTRACT.mindMap.snapshotRetentionLimit;
 const KNOWLEDGE_DOCUMENT_SNAPSHOT_RETENTION_LIMIT = AISTUDY_CORE_CONTRACT.knowledgeDocument.snapshotRetentionLimit;
 const BEFORE_CLOSE_DRAIN_TIMEOUT_MS = 2500;
+const INLINE_DATA_URL_PATTERN = /^data:[^;,]+(?:;[^,]+)*;base64,/i;
 
 type CourseRecord = {
   id: string;
   name: string;
   description: string;
+  sectionId: string | null;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type CourseSectionRecord = {
+  id: string;
+  name: string;
+  sortOrder: number;
+  collapsed: boolean;
   createdAt: string;
   updatedAt: string;
 };
 
 type CourseStore = {
+  sections: CourseSectionRecord[];
   courses: CourseRecord[];
   activeCourseId: string | null;
 };
+
+type CourseSyncStatus = {
+  state: "saved" | "waiting" | "attention";
+  pendingCount: number;
+};
+
+type AppErrorLogEntry = {
+  id: string;
+  source: string;
+  userMessage: string;
+  errorCode: string;
+  domain: string;
+  reason: string;
+  action: string;
+  retryable: boolean;
+  createdAt: string;
+};
+
+type CourseCreateRequest = {
+  name?: unknown;
+  description?: unknown;
+  sectionId?: unknown;
+};
+
+type CourseRenameRequest = {
+  id?: unknown;
+  name?: unknown;
+  description?: unknown;
+};
+
+type CourseMoveRequest = {
+  id?: unknown;
+  sectionId?: unknown;
+};
+
+type CourseReorderRequest = {
+  id?: unknown;
+  sectionId?: unknown;
+  beforeCourseId?: unknown;
+};
+
+type CourseSectionNameRequest = {
+  name?: unknown;
+};
+
+type CourseSectionRenameRequest = {
+  id?: unknown;
+  name?: unknown;
+};
+
+type CourseSectionReorderRequest = {
+  id?: unknown;
+  beforeSectionId?: unknown;
+};
+
+type CourseSectionToggleRequest = {
+  id?: unknown;
+  collapsed?: unknown;
+};
+
+type PendingCourseOperation = {
+  id: string;
+  action:
+    | "course:create"
+    | "course:rename"
+    | "course:move"
+    | "course:reorder"
+    | "course:delete"
+    | "section:create"
+    | "section:rename"
+    | "section:reorder"
+    | "section:toggle"
+    | "section:delete";
+  payload: Record<string, unknown>;
+  createdAt: string;
+  retryCount: number;
+  lastError?: string;
+};
+
+const PENDING_COURSE_OPERATION_ACTIONS = new Set<PendingCourseOperation["action"]>([
+  "course:create",
+  "course:rename",
+  "course:move",
+  "course:reorder",
+  "course:delete",
+  "section:create",
+  "section:rename",
+  "section:reorder",
+  "section:toggle",
+  "section:delete"
+]);
 
 type SimpleMindMapNodeData = {
   uid?: string;
@@ -124,17 +229,32 @@ type MysqlConfig = {
   password: string;
   database: string;
   courseTable: string;
+  courseSectionTable: string;
   mindMapTable: string;
   mindMapSnapshotTable: string;
   mindMapNodeTable: string;
   knowledgeDocumentTable: string;
   knowledgeDocumentSnapshotTable: string;
+  assetTable: string;
+  knowledgeAssetLinkTable: string;
+  errorLogTable: string;
 };
 
 type CourseRow = RowDataPacket & {
   id: string;
   name: string;
   description: string;
+  sectionId: string | null;
+  sortOrder: number;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+};
+
+type CourseSectionRow = RowDataPacket & {
+  id: string;
+  name: string;
+  sortOrder: number;
+  collapsed: number;
   createdAt: Date | string;
   updatedAt: Date | string;
 };
@@ -142,11 +262,23 @@ type CourseRow = RowDataPacket & {
 type MysqlRuntime = {
   pool: Pool;
   courseTable: string;
+  courseSectionTable: string;
   mindMapTable: string;
   mindMapSnapshotTable: string;
   mindMapNodeTable: string;
   knowledgeDocumentTable: string;
   knowledgeDocumentSnapshotTable: string;
+  assetTable: string;
+  knowledgeAssetLinkTable: string;
+  errorLogTable: string;
+};
+
+type AppErrorLogRow = RowDataPacket & {
+  id: string;
+  source: string;
+  userMessage: string;
+  errorCode: string;
+  createdAt: Date | string;
 };
 
 type MindMapRow = RowDataPacket & {
@@ -272,6 +404,28 @@ type UpdateDownloadResult = {
   fileSize: number;
 };
 
+type RuntimeDiagnosticStatus = "ok" | "warning" | "error" | "disabled";
+
+type RuntimeDiagnosticItem = {
+  id: string;
+  name: string;
+  status: RuntimeDiagnosticStatus;
+  message: string;
+  action: string;
+  retryable: boolean;
+};
+
+type RuntimeDiagnosticResult = {
+  checkedAt: string;
+  summary: {
+    ok: number;
+    warning: number;
+    error: number;
+    disabled: number;
+  };
+  items: RuntimeDiagnosticItem[];
+};
+
 type ChromePortPlatformId = "doubao" | "chatgpt";
 
 type ChromePortDefinition = {
@@ -377,8 +531,8 @@ const chromePortDefinitions: ChromePortDefinition[] = [
     loginUrl: "https://chatgpt.com/",
     hostKeyword: "chatgpt.com",
     authCookieDomains: ["chatgpt.com", "openai.com"],
-    authCookieNames: ["__Secure-next-auth.session-token", "__Secure-authjs.session-token", "oai-did", "oai-sc"],
-    authDomKeywords: ["New chat", "ChatGPT"]
+    authCookieNames: ["__Secure-next-auth.session-token", "__Secure-authjs.session-token"],
+    authDomKeywords: []
   }
 ];
 
@@ -409,25 +563,33 @@ function getChromePortDefinition(platformId: unknown) {
   return chromePortDefinitions.find((platform) => platform.id === platformId);
 }
 
-function getChromePortRuntimeRoot() {
-  const configuredRoot = process.env.AISTUDY_RUNTIME_ROOT?.trim();
-  if (configuredRoot) return configuredRoot;
+function getAistudyDataRoot() {
+  const configuredDataRoot = process.env.AISTUDY_DATA_ROOT?.trim();
+  if (configuredDataRoot) return configuredDataRoot;
   if (isDev) return path.join(app.getAppPath(), ".runtime");
 
-  const configuredDataRoot = process.env.AISTUDY_DATA_ROOT?.trim();
-  if (configuredDataRoot) return path.join(configuredDataRoot, "runtime");
-
-  const exeDriveRoot = path.parse(app.getPath("exe")).root;
-  if (exeDriveRoot && !exeDriveRoot.toLowerCase().startsWith("c:")) {
-    return path.join(exeDriveRoot, "AIstudyData", "runtime");
+  const exeDir = path.dirname(app.getPath("exe"));
+  const exeDirRoot = path.parse(exeDir).root;
+  if (exeDirRoot && !exeDirRoot.toLowerCase().startsWith("c:")) {
+    return path.join(exeDir, "AIstudyData");
   }
 
   const fDriveRoot = "F:\\";
   if (existsSync(fDriveRoot)) {
-    return path.join(fDriveRoot, "AIstudyData", "runtime");
+    return path.join(fDriveRoot, "AIstudyData");
   }
 
-  return path.join(app.getPath("userData"), "runtime");
+  return path.join(app.getPath("userData"), "AIstudyData");
+}
+
+function getAistudyDataPath(...segments: string[]) {
+  return path.join(getAistudyDataRoot(), ...segments);
+}
+
+function getChromePortRuntimeRoot() {
+  const configuredRoot = process.env.AISTUDY_RUNTIME_ROOT?.trim();
+  if (configuredRoot) return configuredRoot;
+  return getAistudyDataPath("runtime");
 }
 
 function getChromePortProfileDir(platform: ChromePortDefinition) {
@@ -645,7 +807,11 @@ function cookieMatchesPlatformAuth(platform: ChromePortDefinition, cookie: Chrom
   const value = cookie.value ?? "";
   if (!value) return false;
   const domainMatched = platform.authCookieDomains.some((keyword) => domain.includes(keyword));
-  const nameMatched = platform.authCookieNames.some((cookieName) => cookieName.toLowerCase() === name.toLowerCase());
+  const normalizedName = name.toLowerCase();
+  const nameMatched = platform.authCookieNames.some((cookieName) => {
+    const normalizedCookieName = cookieName.toLowerCase();
+    return normalizedName === normalizedCookieName || normalizedName.startsWith(`${normalizedCookieName}.`);
+  });
   return domainMatched && nameMatched;
 }
 
@@ -1764,26 +1930,55 @@ async function openChromePortLogin(platformId: unknown): Promise<ChromePortOpenR
 
 function normalizeCourseStore(value: unknown): CourseStore {
   if (!value || typeof value !== "object") {
-    return { courses: [], activeCourseId: null };
+    return { sections: [], courses: [], activeCourseId: null };
   }
 
   const candidate = value as Partial<CourseStore>;
+  const sectionIds = new Set<string>();
+  const sections = Array.isArray(candidate.sections)
+    ? candidate.sections
+        .filter(
+          (section): section is CourseSectionRecord =>
+            Boolean(section) &&
+            typeof section.id === "string" &&
+            typeof section.name === "string" &&
+            typeof section.createdAt === "string" &&
+            typeof section.updatedAt === "string"
+        )
+        .map((section, index) => {
+          sectionIds.add(section.id);
+          return {
+            id: section.id,
+            name: section.name,
+            sortOrder: Number.isFinite(section.sortOrder) ? section.sortOrder : index,
+            collapsed: Boolean(section.collapsed),
+            createdAt: section.createdAt,
+            updatedAt: section.updatedAt
+          };
+        })
+    : [];
   const courses = Array.isArray(candidate.courses)
-    ? candidate.courses.filter(
-        (course): course is CourseRecord =>
-          Boolean(course) &&
-          typeof course.id === "string" &&
-          typeof course.name === "string" &&
-          typeof course.description === "string" &&
-          typeof course.createdAt === "string" &&
-          typeof course.updatedAt === "string"
-      )
+    ? candidate.courses
+        .filter(
+          (course): course is CourseRecord =>
+            Boolean(course) &&
+            typeof course.id === "string" &&
+            typeof course.name === "string" &&
+            typeof course.description === "string" &&
+            typeof course.createdAt === "string" &&
+            typeof course.updatedAt === "string"
+        )
+        .map((course, index) => ({
+          ...course,
+          sectionId: typeof course.sectionId === "string" && sectionIds.has(course.sectionId) ? course.sectionId : null,
+          sortOrder: Number.isFinite(course.sortOrder) ? course.sortOrder : index
+        }))
     : [];
   const activeCourseId = typeof candidate.activeCourseId === "string" && courses.some((course) => course.id === candidate.activeCourseId)
     ? candidate.activeCourseId
     : null;
 
-  return { courses, activeCourseId };
+  return { sections, courses, activeCourseId };
 }
 
 function validateMysqlIdentifier(value: string, label: string) {
@@ -1834,8 +2029,9 @@ async function readMysqlConfigFile(filePath: string) {
 
 async function readMysqlConfig(): Promise<MysqlConfig> {
   const executableConfig = await readMysqlConfigFile(path.join(path.dirname(process.execPath), "mysql.config.json"));
+  const dataRootConfig = await readMysqlConfigFile(getAistudyDataPath("config", "mysql.config.json"));
   const userConfig = await readMysqlConfigFile(path.join(app.getPath("userData"), "mysql.config.json"));
-  const mergedConfig = { ...executableConfig, ...userConfig };
+  const mergedConfig = { ...executableConfig, ...dataRootConfig, ...userConfig };
 
   const config = {
     host: getStringSetting(process.env.AISTUDY_MYSQL_HOST, getStringSetting(readSetting(mergedConfig, "host"), "127.0.0.1")),
@@ -1848,6 +2044,10 @@ async function readMysqlConfig(): Promise<MysqlConfig> {
     courseTable: getStringSetting(
       process.env.AISTUDY_MYSQL_COURSE_TABLE,
       getStringSetting(readSetting(mergedConfig, "courseTable"), "course_management_courses")
+    ),
+    courseSectionTable: getStringSetting(
+      process.env.AISTUDY_MYSQL_COURSE_SECTION_TABLE,
+      getStringSetting(readSetting(mergedConfig, "courseSectionTable"), "knowledge_sections")
     ),
     mindMapTable: getStringSetting(
       process.env.AISTUDY_MYSQL_MIND_MAP_TABLE,
@@ -1868,16 +2068,32 @@ async function readMysqlConfig(): Promise<MysqlConfig> {
     knowledgeDocumentSnapshotTable: getStringSetting(
       process.env.AISTUDY_MYSQL_KNOWLEDGE_DOCUMENT_SNAPSHOT_TABLE,
       getStringSetting(readSetting(mergedConfig, "knowledgeDocumentSnapshotTable"), "knowledge_document_snapshots")
+    ),
+    assetTable: getStringSetting(
+      process.env.AISTUDY_MYSQL_ASSET_TABLE,
+      getStringSetting(readSetting(mergedConfig, "assetTable"), "knowledge_assets")
+    ),
+    knowledgeAssetLinkTable: getStringSetting(
+      process.env.AISTUDY_MYSQL_KNOWLEDGE_ASSET_LINK_TABLE,
+      getStringSetting(readSetting(mergedConfig, "knowledgeAssetLinkTable"), "knowledge_asset_links")
+    ),
+    errorLogTable: getStringSetting(
+      process.env.AISTUDY_MYSQL_ERROR_LOG_TABLE,
+      getStringSetting(readSetting(mergedConfig, "errorLogTable"), "app_error_logs")
     )
   };
 
   validateMysqlIdentifier(config.database, "MySQL database");
   validateMysqlIdentifier(config.courseTable, "MySQL course table");
+  validateMysqlIdentifier(config.courseSectionTable, "MySQL course section table");
   validateMysqlIdentifier(config.mindMapTable, "MySQL mind map table");
   validateMysqlIdentifier(config.mindMapSnapshotTable, "MySQL mind map snapshot table");
   validateMysqlIdentifier(config.mindMapNodeTable, "MySQL mind map node table");
   validateMysqlIdentifier(config.knowledgeDocumentTable, "MySQL knowledge document table");
   validateMysqlIdentifier(config.knowledgeDocumentSnapshotTable, "MySQL knowledge document snapshot table");
+  validateMysqlIdentifier(config.assetTable, "MySQL asset table");
+  validateMysqlIdentifier(config.knowledgeAssetLinkTable, "MySQL knowledge asset link table");
+  validateMysqlIdentifier(config.errorLogTable, "MySQL error log table");
   return config;
 }
 
@@ -1904,11 +2120,34 @@ async function ensureCourseTable(pool: Pool, courseTable: string) {
       id VARCHAR(64) NOT NULL,
       name VARCHAR(120) NOT NULL,
       description TEXT NOT NULL,
+      section_id VARCHAR(64) NULL,
+      sort_order INT NOT NULL DEFAULT 0,
       created_at DATETIME(3) NOT NULL,
       updated_at DATETIME(3) NOT NULL,
+      deleted_at DATETIME(3) NULL,
       PRIMARY KEY (id),
+      KEY idx_section_order (section_id, sort_order),
       KEY idx_updated_at (updated_at),
-      KEY idx_name (name)
+      KEY idx_name (name),
+      KEY idx_course_live_order (deleted_at, section_id, sort_order, updated_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+}
+
+async function ensureCourseSectionTable(pool: Pool, sectionTable: string) {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ${sectionTable} (
+      id VARCHAR(64) NOT NULL,
+      name VARCHAR(120) NOT NULL,
+      sort_order INT NOT NULL DEFAULT 0,
+      collapsed TINYINT(1) NOT NULL DEFAULT 0,
+      created_at DATETIME(3) NOT NULL,
+      updated_at DATETIME(3) NOT NULL,
+      deleted_at DATETIME(3) NULL,
+      PRIMARY KEY (id),
+      KEY idx_section_order (sort_order),
+      KEY idx_section_name (name),
+      KEY idx_section_live_order (deleted_at, sort_order, updated_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
 }
@@ -1947,6 +2186,21 @@ async function addMysqlColumnIfMissing(pool: Pool, table: string, tableName: str
 async function addMysqlIndexIfMissing(pool: Pool, table: string, tableName: string, indexName: string, definition: string) {
   if (await hasMysqlIndex(pool, tableName, indexName)) return;
   await pool.query(`ALTER TABLE ${table} ADD ${definition}`);
+}
+
+async function migrateCourseTable(pool: Pool, courseTable: string) {
+  const courseTableName = rawMysqlIdentifier(courseTable);
+  await addMysqlColumnIfMissing(pool, courseTable, courseTableName, "section_id", "`section_id` VARCHAR(64) NULL AFTER `description`");
+  await addMysqlColumnIfMissing(pool, courseTable, courseTableName, "sort_order", "`sort_order` INT NOT NULL DEFAULT 0 AFTER `section_id`");
+  await addMysqlColumnIfMissing(pool, courseTable, courseTableName, "deleted_at", "`deleted_at` DATETIME(3) NULL AFTER `updated_at`");
+  await addMysqlIndexIfMissing(pool, courseTable, courseTableName, "idx_section_order", "KEY idx_section_order (section_id, sort_order)");
+  await addMysqlIndexIfMissing(pool, courseTable, courseTableName, "idx_course_live_order", "KEY idx_course_live_order (deleted_at, section_id, sort_order, updated_at)");
+}
+
+async function migrateCourseSectionTable(pool: Pool, sectionTable: string) {
+  const sectionTableName = rawMysqlIdentifier(sectionTable);
+  await addMysqlColumnIfMissing(pool, sectionTable, sectionTableName, "deleted_at", "`deleted_at` DATETIME(3) NULL AFTER `updated_at`");
+  await addMysqlIndexIfMissing(pool, sectionTable, sectionTableName, "idx_section_live_order", "KEY idx_section_live_order (deleted_at, sort_order, updated_at)");
 }
 
 async function migrateMindMapTables(pool: Pool, mindMapTable: string, snapshotTable: string, nodeTable: string) {
@@ -2196,6 +2450,151 @@ async function ensureKnowledgeDocumentTables(pool: Pool, documentTable: string, 
   await migrateKnowledgeDocumentTables(pool, documentTable, snapshotTable);
 }
 
+async function migrateKnowledgeAssetTables(pool: Pool, assetTable: string, assetLinkTable: string) {
+  const assetTableName = rawMysqlIdentifier(assetTable);
+  const assetLinkTableName = rawMysqlIdentifier(assetLinkTable);
+
+  await addMysqlColumnIfMissing(pool, assetTable, assetTableName, "deleted_at", "`deleted_at` DATETIME(3) NULL AFTER `updated_at`");
+  await addMysqlIndexIfMissing(pool, assetTable, assetTableName, "uk_asset_sha256", "UNIQUE KEY uk_asset_sha256 (sha256)");
+  await addMysqlIndexIfMissing(pool, assetTable, assetTableName, "idx_asset_created", "KEY idx_asset_created (created_at)");
+  await addMysqlIndexIfMissing(pool, assetTable, assetTableName, "idx_asset_deleted_at", "KEY idx_asset_deleted_at (deleted_at)");
+
+  await addMysqlColumnIfMissing(pool, assetLinkTable, assetLinkTableName, "deleted_at", "`deleted_at` DATETIME(3) NULL AFTER `created_at`");
+  await pool.query(`UPDATE ${assetLinkTable} SET document_id = '' WHERE document_id IS NULL`);
+  await pool.query(`ALTER TABLE ${assetLinkTable} MODIFY COLUMN document_id VARCHAR(64) NOT NULL DEFAULT ''`);
+  await addMysqlIndexIfMissing(
+    pool,
+    assetLinkTable,
+    assetLinkTableName,
+    "idx_asset_link_asset",
+    "KEY idx_asset_link_asset (asset_id, deleted_at)"
+  );
+  await addMysqlIndexIfMissing(
+    pool,
+    assetLinkTable,
+    assetLinkTableName,
+    "idx_asset_link_document",
+    "KEY idx_asset_link_document (document_id, relation_type, deleted_at)"
+  );
+  await addMysqlIndexIfMissing(
+    pool,
+    assetLinkTable,
+    assetLinkTableName,
+    "idx_asset_link_node",
+    "KEY idx_asset_link_node (course_id, mind_map_id, node_id, relation_type, deleted_at)"
+  );
+  await addMysqlIndexIfMissing(
+    pool,
+    assetLinkTable,
+    assetLinkTableName,
+    "uk_asset_link_scope",
+    "UNIQUE KEY uk_asset_link_scope (asset_id, course_id, mind_map_id, node_id, document_id, relation_type)"
+  );
+}
+
+async function ensureKnowledgeAssetTables(pool: Pool, assetTable: string, assetLinkTable: string) {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ${assetTable} (
+      id VARCHAR(64) NOT NULL,
+      sha256 CHAR(64) NOT NULL,
+      local_path VARCHAR(1024) NOT NULL,
+      mime_type VARCHAR(120) NOT NULL,
+      byte_size BIGINT NOT NULL DEFAULT 0,
+      created_at DATETIME(3) NOT NULL,
+      updated_at DATETIME(3) NOT NULL,
+      deleted_at DATETIME(3) NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY uk_asset_sha256 (sha256),
+      KEY idx_asset_created (created_at),
+      KEY idx_asset_deleted_at (deleted_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ${assetLinkTable} (
+      id VARCHAR(64) NOT NULL,
+      asset_id VARCHAR(64) NOT NULL,
+      course_id VARCHAR(64) NOT NULL,
+      mind_map_id VARCHAR(64) NOT NULL,
+      node_id VARCHAR(96) NOT NULL,
+      document_id VARCHAR(64) NOT NULL DEFAULT '',
+      relation_type VARCHAR(40) NOT NULL,
+      created_at DATETIME(3) NOT NULL,
+      deleted_at DATETIME(3) NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY uk_asset_link_scope (asset_id, course_id, mind_map_id, node_id, document_id, relation_type),
+      KEY idx_asset_link_asset (asset_id, deleted_at),
+      KEY idx_asset_link_document (document_id, relation_type, deleted_at),
+      KEY idx_asset_link_node (course_id, mind_map_id, node_id, relation_type, deleted_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  await migrateKnowledgeAssetTables(pool, assetTable, assetLinkTable);
+}
+
+async function ensureErrorLogTable(pool: Pool, errorLogTable: string) {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ${errorLogTable} (
+      id VARCHAR(64) NOT NULL,
+      source VARCHAR(120) NOT NULL,
+      user_message VARCHAR(255) NOT NULL,
+      technical_message LONGTEXT NOT NULL,
+      error_code VARCHAR(120) NOT NULL,
+      context_json TEXT NOT NULL,
+      created_at DATETIME(3) NOT NULL,
+      PRIMARY KEY (id),
+      KEY idx_error_created (created_at),
+      KEY idx_error_source (source, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+}
+
+async function recordAppError(input: {
+  source: string;
+  userMessage: string;
+  error: unknown;
+  context?: Record<string, unknown>;
+}) {
+  try {
+    const runtime = await getMysqlRuntime();
+    const classified = classifyAppError(input.source, input.error, input.userMessage);
+    await runtime.pool.execute(
+      `INSERT INTO ${runtime.errorLogTable} (id, source, user_message, technical_message, error_code, context_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        randomUUID(),
+        input.source.slice(0, 120),
+        classified.userMessage.slice(0, 255),
+        classified.technicalMessage,
+        classified.code,
+        JSON.stringify({ ...classified.context, ...input.context, domain: classified.domain, reason: classified.reason, action: classified.action, retryable: classified.retryable }),
+        new Date()
+      ]
+    );
+  } catch (logError) {
+    console.warn("App error log write failed.", logError);
+  }
+}
+
+async function listAppErrorLogs(limitValue: unknown): Promise<AppErrorLogEntry[]> {
+  const limit = Math.min(Math.max(Number.isFinite(Number(limitValue)) ? Number(limitValue) : 50, 1), 100);
+  const runtime = await getMysqlRuntime();
+  const [rows] = await runtime.pool.execute<AppErrorLogRow[]>(
+    `SELECT id, source, user_message AS userMessage, error_code AS errorCode, created_at AS createdAt
+     FROM ${runtime.errorLogTable}
+     ORDER BY created_at DESC
+     LIMIT ${limit}`
+  );
+  return rows.map((row) => ({
+    ...getAppErrorDefinition(row.errorCode),
+    id: row.id,
+    source: row.source,
+    userMessage: row.userMessage,
+    errorCode: row.errorCode,
+    createdAt: toIsoTimestamp(row.createdAt)
+  }));
+}
+
 async function createMysqlRuntime(): Promise<MysqlRuntime> {
   const config = await readMysqlConfig();
   try {
@@ -2215,6 +2614,7 @@ async function createMysqlRuntime(): Promise<MysqlRuntime> {
     charset: "utf8mb4"
   });
   const courseTable = escapeMysqlIdentifier(config.courseTable, "MySQL course table");
+  const courseSectionTable = escapeMysqlIdentifier(config.courseSectionTable, "MySQL course section table");
   const mindMapTable = escapeMysqlIdentifier(config.mindMapTable, "MySQL mind map table");
   const mindMapSnapshotTable = escapeMysqlIdentifier(config.mindMapSnapshotTable, "MySQL mind map snapshot table");
   const mindMapNodeTable = escapeMysqlIdentifier(config.mindMapNodeTable, "MySQL mind map node table");
@@ -2223,18 +2623,30 @@ async function createMysqlRuntime(): Promise<MysqlRuntime> {
     config.knowledgeDocumentSnapshotTable,
     "MySQL knowledge document snapshot table"
   );
+  const assetTable = escapeMysqlIdentifier(config.assetTable, "MySQL asset table");
+  const knowledgeAssetLinkTable = escapeMysqlIdentifier(config.knowledgeAssetLinkTable, "MySQL knowledge asset link table");
+  const errorLogTable = escapeMysqlIdentifier(config.errorLogTable, "MySQL error log table");
   await ensureCourseTable(pool, courseTable);
+  await migrateCourseTable(pool, courseTable);
+  await ensureCourseSectionTable(pool, courseSectionTable);
+  await migrateCourseSectionTable(pool, courseSectionTable);
   await ensureMindMapTables(pool, mindMapTable, mindMapSnapshotTable, mindMapNodeTable);
   await ensureKnowledgeDocumentTables(pool, knowledgeDocumentTable, knowledgeDocumentSnapshotTable);
+  await ensureKnowledgeAssetTables(pool, assetTable, knowledgeAssetLinkTable);
+  await ensureErrorLogTable(pool, errorLogTable);
 
   mysqlRuntime = {
     pool,
     courseTable,
+    courseSectionTable,
     mindMapTable,
     mindMapSnapshotTable,
     mindMapNodeTable,
     knowledgeDocumentTable,
-    knowledgeDocumentSnapshotTable
+    knowledgeDocumentSnapshotTable,
+    assetTable,
+    knowledgeAssetLinkTable,
+    errorLogTable
   };
   return mysqlRuntime;
 }
@@ -2275,26 +2687,205 @@ function toMysqlDate(value: string) {
 }
 
 function getCourseStoreFilePath() {
+  return getAistudyDataPath("state", "courses.json");
+}
+
+function getPendingCourseOperationsFilePath() {
+  return getAistudyDataPath("state", "course-pending-operations.json");
+}
+
+function getLegacyCourseStoreFilePath() {
   return path.join(app.getPath("userData"), "courses.json");
 }
 
+function getLegacyPendingCourseOperationsFilePath() {
+  return path.join(app.getPath("userData"), "course-pending-operations.json");
+}
+
 async function readLocalCourseStore(): Promise<CourseStore> {
+  const filePath = await pathExists(getCourseStoreFilePath()) ? getCourseStoreFilePath() : getLegacyCourseStoreFilePath();
   try {
-    const raw = await fs.readFile(getCourseStoreFilePath(), "utf8");
+    const raw = await fs.readFile(filePath, "utf8");
     return normalizeCourseStore(JSON.parse(raw));
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-      return { courses: [], activeCourseId: null };
+      return { sections: [], courses: [], activeCourseId: null };
     }
-    throw error;
+    await quarantineUnreadableFile(filePath, error);
+    return { sections: [], courses: [], activeCourseId: null };
   }
 }
 
 async function writeLocalCourseStore(store: CourseStore) {
   const normalized = normalizeCourseStore(store);
-  await fs.mkdir(path.dirname(getCourseStoreFilePath()), { recursive: true });
-  await fs.writeFile(getCourseStoreFilePath(), JSON.stringify(normalized, null, 2), "utf8");
+  await writeJsonAtomic(getCourseStoreFilePath(), normalized);
   return normalized;
+}
+
+async function writeJsonAtomic(filePath: string, value: unknown) {
+  const dirPath = path.dirname(filePath);
+  await fs.mkdir(dirPath, { recursive: true });
+  const tempPath = path.join(dirPath, `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`);
+  const content = JSON.stringify(value, null, 2);
+  try {
+    await fs.writeFile(tempPath, content, "utf8");
+    await fs.rm(filePath, { force: true });
+    await fs.rename(tempPath, filePath);
+  } catch (error) {
+    try {
+      await fs.copyFile(tempPath, filePath);
+    } finally {
+      await fs.rm(tempPath, { force: true }).catch(() => undefined);
+    }
+    console.warn("Atomic JSON replace fell back to direct overwrite.", error);
+  }
+}
+
+async function quarantineUnreadableFile(filePath: string, reason: unknown) {
+  try {
+    await fs.access(filePath);
+  } catch {
+    return;
+  }
+
+  const quarantinePath = path.join(
+    path.dirname(filePath),
+    `${path.basename(filePath)}.corrupt-${Date.now()}.json`
+  );
+  try {
+    await fs.rename(filePath, quarantinePath);
+    console.warn(`Unreadable file was quarantined: ${quarantinePath}`, reason);
+  } catch (error) {
+    console.warn(`Unreadable file could not be quarantined: ${filePath}`, error);
+  }
+}
+
+function normalizePendingCourseOperations(value: unknown): PendingCourseOperation[] {
+  if (!Array.isArray(value)) {
+    throw new Error("Pending course operations must be an array.");
+  }
+
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    .map((item) => {
+      const action = item.action;
+      if (typeof action !== "string" || !PENDING_COURSE_OPERATION_ACTIONS.has(action as PendingCourseOperation["action"])) {
+        throw new Error("Pending course operation action is invalid.");
+      }
+
+      const payload = item.payload && typeof item.payload === "object" && !Array.isArray(item.payload)
+        ? item.payload as Record<string, unknown>
+        : {};
+
+      return {
+        id: normalizeId(item.id, "Pending course operation id", randomUUID()),
+        action: action as PendingCourseOperation["action"],
+        payload,
+        createdAt: toIsoTimestamp(typeof item.createdAt === "string" ? item.createdAt : new Date().toISOString()),
+        retryCount: Number.isFinite(Number(item.retryCount)) ? Number(item.retryCount) : 0,
+        lastError: typeof item.lastError === "string" ? item.lastError.slice(0, 500) : undefined
+      };
+    });
+}
+
+async function readPendingCourseOperations() {
+  const filePath = await pathExists(getPendingCourseOperationsFilePath()) ? getPendingCourseOperationsFilePath() : getLegacyPendingCourseOperationsFilePath();
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    return normalizePendingCourseOperations(JSON.parse(raw));
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return [];
+    }
+    await quarantineUnreadableFile(filePath, error);
+    return [];
+  }
+}
+
+async function writePendingCourseOperations(operations: PendingCourseOperation[]) {
+  await writeJsonAtomic(getPendingCourseOperationsFilePath(), operations);
+}
+
+async function appendPendingCourseOperation(action: PendingCourseOperation["action"], payload: Record<string, unknown>) {
+  const operations = await readPendingCourseOperations();
+  operations.push({
+    id: randomUUID(),
+    action,
+    payload,
+    createdAt: new Date().toISOString(),
+    retryCount: 0
+  });
+  await writePendingCourseOperations(operations);
+}
+
+async function getCourseSyncStatus(): Promise<CourseSyncStatus> {
+  const operations = await readPendingCourseOperations();
+  const hasReplayFailure = operations.some((operation) => operation.retryCount > 0 || Boolean(operation.lastError));
+  return {
+    state: operations.length === 0 ? "saved" : hasReplayFailure ? "attention" : "waiting",
+    pendingCount: operations.length
+  };
+}
+
+function readPendingPayloadString(operation: PendingCourseOperation, key: string) {
+  const value = operation.payload[key];
+  if (typeof value !== "string") {
+    throw new Error(`Pending course operation ${operation.action} is missing ${key}.`);
+  }
+  return value;
+}
+
+function readPendingPayloadOptionalString(operation: PendingCourseOperation, key: string) {
+  const value = operation.payload[key];
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function readPendingPayloadNumber(operation: PendingCourseOperation, key: string) {
+  const value = Number(operation.payload[key]);
+  if (!Number.isFinite(value)) {
+    throw new Error(`Pending course operation ${operation.action} has invalid ${key}.`);
+  }
+  return value;
+}
+
+function readPendingPayloadBoolean(operation: PendingCourseOperation, key: string) {
+  const value = operation.payload[key];
+  if (typeof value !== "boolean") {
+    throw new Error(`Pending course operation ${operation.action} has invalid ${key}.`);
+  }
+  return value;
+}
+
+function readPendingPayloadRecord(operation: PendingCourseOperation, key: string) {
+  const value = operation.payload[key];
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Pending course operation ${operation.action} is missing ${key}.`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function readPendingPayloadRecordArray(operation: PendingCourseOperation, key: string) {
+  const value = operation.payload[key];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
+}
+
+function numberFromRecord(record: Record<string, unknown>, key: string, fallback = 0) {
+  const value = Number(record[key]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function stringFromRecord(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (typeof value !== "string") {
+    throw new Error(`Pending course payload is missing ${key}.`);
+  }
+  return value;
+}
+
+function nullableStringFromRecord(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 async function pathExists(filePath: string) {
@@ -2304,6 +2895,165 @@ async function pathExists(filePath: string) {
   } catch {
     return false;
   }
+}
+
+function createDiagnosticItem(
+  id: string,
+  name: string,
+  status: RuntimeDiagnosticStatus,
+  message: string,
+  action: string,
+  retryable = true
+): RuntimeDiagnosticItem {
+  return { id, name, status, message, action, retryable };
+}
+
+async function checkRuntimeDataRoot(): Promise<RuntimeDiagnosticItem> {
+  try {
+    const requiredDirectories = [
+      getAistudyDataPath("config"),
+      getAistudyDataPath("state"),
+      getAistudyDataPath("runtime"),
+      getAistudyDataPath("runtime", "chrome-profiles"),
+      getAistudyDataPath("assets"),
+      getAistudyDataPath("updates"),
+      getAistudyDataPath("backups"),
+      getAistudyDataPath("logs")
+    ];
+    for (const dirPath of requiredDirectories) {
+      await fs.mkdir(dirPath, { recursive: true });
+    }
+    const probePath = getAistudyDataPath("state", `.write-test-${process.pid}-${randomUUID()}.tmp`);
+    await fs.writeFile(probePath, "ok", "utf8");
+    await fs.rm(probePath, { force: true });
+    return createDiagnosticItem("data-root", "核心数据目录", "ok", "数据目录可以正常读写。", "无需处理。", false);
+  } catch {
+    return createDiagnosticItem("data-root", "核心数据目录", "error", "数据目录暂时不可写，保存和迁移可能受影响。", "请检查磁盘权限，或用 AISTUDY_DATA_ROOT 指定可写目录。");
+  }
+}
+
+async function checkLocalRecoveryFiles(): Promise<RuntimeDiagnosticItem> {
+  try {
+    await readLocalCourseStore();
+    await readPendingCourseOperations();
+    return createDiagnosticItem("local-recovery", "本机恢复文件", "ok", "本机镜像和待同步记录可读取。", "无需处理。", false);
+  } catch {
+    return createDiagnosticItem("local-recovery", "本机恢复文件", "warning", "本机恢复文件需要重新整理。", "系统会优先隔离损坏文件，后续可重新同步。");
+  }
+}
+
+async function checkMysqlRuntime(): Promise<RuntimeDiagnosticItem> {
+  try {
+    const runtime = await getMysqlRuntime();
+    await runtime.pool.query("SELECT 1");
+    return createDiagnosticItem("mysql", "MySQL 数据库", "ok", "数据库连接和基础表可用。", "无需处理。", false);
+  } catch {
+    return createDiagnosticItem("mysql", "MySQL 数据库", "warning", "数据库暂时连接不上，知识库会先保存在本机。", "请检查 MySQL 是否启动，以及账号、密码和权限是否正确。");
+  }
+}
+
+async function checkErrorLogRuntime(): Promise<RuntimeDiagnosticItem> {
+  try {
+    const runtime = await getMysqlRuntime();
+    await runtime.pool.query(`SELECT id FROM ${runtime.errorLogTable} LIMIT 1`);
+    return createDiagnosticItem("error-log", "报错日志", "ok", "报错日志可以写入和读取。", "无需处理。", false);
+  } catch {
+    return createDiagnosticItem("error-log", "报错日志", "warning", "报错日志暂时不可用。", "数据库恢复后，错误记录会重新可用。");
+  }
+}
+
+async function checkChromeRuntime(): Promise<RuntimeDiagnosticItem> {
+  const chromePath = await findChromeExecutable();
+  if (!chromePath) {
+    return createDiagnosticItem("chrome", "Chrome 浏览器", "warning", "没有找到 Chrome，AI 网页助手暂时不能启动。", "请安装 Chrome，或用 AISTUDY_CHROME_PATH 指定浏览器位置。");
+  }
+  return createDiagnosticItem("chrome", "Chrome 浏览器", "ok", "已找到可启动的 Chrome。", "无需处理。", false);
+}
+
+async function checkChromePortRuntime(platform: ChromePortDefinition): Promise<RuntimeDiagnosticItem> {
+  try {
+    const status = await getChromePortStatus(platform);
+    if (status.authenticated) {
+      return createDiagnosticItem(`chrome-port-${platform.id}`, `${platform.name} 端口`, "ok", `${platform.name} 已识别登录状态。`, "无需处理。", false);
+    }
+    if (status.connected) {
+      return createDiagnosticItem(`chrome-port-${platform.id}`, `${platform.name} 端口`, "warning", `${platform.name} 已打开，但还没有确认登录状态。`, "请在端口管理完成登录后重新检查。");
+    }
+    return createDiagnosticItem(`chrome-port-${platform.id}`, `${platform.name} 端口`, "warning", `${platform.name} 固定端口暂未启动。`, "需要使用 AI 时，请到端口管理打开登录窗口。");
+  } catch {
+    return createDiagnosticItem(`chrome-port-${platform.id}`, `${platform.name} 端口`, "warning", `${platform.name} 端口状态暂时无法读取。`, "请稍后重新检查，或在端口管理手动打开。");
+  }
+}
+
+async function fetchJsonWithTimeout(url: string, timeoutMs: number) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": "AIstudy-Diagnostics"
+      }
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function checkUpdateRuntime(): Promise<RuntimeDiagnosticItem> {
+  try {
+    const repositoryUrl = await getConfiguredRepositoryUrl();
+    const repository = parseGitHubRepository(repositoryUrl);
+    if (!repository) {
+      return createDiagnosticItem("updates", "更新服务", "disabled", "还没有配置可用的线上发布仓库。", "不影响本机使用；需要自动更新时再配置发布仓库。", false);
+    }
+    const response = await fetchJsonWithTimeout(`https://api.github.com/repos/${repository.owner}/${repository.repo}/releases/latest`, 5000);
+    if (response.ok) {
+      return createDiagnosticItem("updates", "更新服务", "ok", "可以访问线上更新源。", "无需处理。", false);
+    }
+    if (response.status === 404) {
+      return createDiagnosticItem("updates", "更新服务", "warning", "线上仓库还没有可用发布版本。", "发布安装包后再重新检查。");
+    }
+    return createDiagnosticItem("updates", "更新服务", "warning", "当前网络暂时无法完成更新检测。", "稍后重试，或在网络可用时再检测更新。");
+  } catch {
+    return createDiagnosticItem("updates", "更新服务", "warning", "当前网络暂时无法访问更新源。", "这不影响本机使用；需要更新时再检查网络。");
+  }
+}
+
+function summarizeRuntimeDiagnostics(items: RuntimeDiagnosticItem[]): RuntimeDiagnosticResult["summary"] {
+  return items.reduce<RuntimeDiagnosticResult["summary"]>(
+    (summary, item) => {
+      summary[item.status] += 1;
+      return summary;
+    },
+    { ok: 0, warning: 0, error: 0, disabled: 0 }
+  );
+}
+
+async function diagnoseRuntime(): Promise<RuntimeDiagnosticResult> {
+  const dataRootItem = await checkRuntimeDataRoot();
+  const items = [
+    dataRootItem,
+    await checkLocalRecoveryFiles(),
+    await checkMysqlRuntime(),
+    await checkErrorLogRuntime(),
+    await checkChromeRuntime(),
+    ...(await Promise.all(chromePortDefinitions.map((platform) => checkChromePortRuntime(platform)))),
+    await checkUpdateRuntime()
+  ];
+  return {
+    checkedAt: new Date().toISOString(),
+    summary: summarizeRuntimeDiagnostics(items),
+    items
+  };
+}
+
+async function openAistudyDataRoot() {
+  await fs.mkdir(getAistudyDataRoot(), { recursive: true });
+  const result = await shell.openPath(getAistudyDataRoot());
+  if (result) throw new Error(result);
+  return true;
 }
 
 async function findProjectRoot() {
@@ -2473,7 +3223,7 @@ async function downloadUpdate(downloadUrlValue: unknown): Promise<UpdateDownload
 
   const url = new URL(downloadUrlValue);
   const fileName = decodeURIComponent(path.basename(url.pathname)) || `AIstudy-Setup-${app.getVersion()}.exe`;
-  const updateDir = path.join(app.getPath("userData"), "updates");
+  const updateDir = getAistudyDataPath("updates");
   const filePath = path.join(updateDir, fileName);
   await fs.mkdir(updateDir, { recursive: true });
 
@@ -2540,20 +3290,49 @@ async function getUpdateManagerInfo(): Promise<UpdateManagerInfo> {
 
 async function readCourseStore(): Promise<CourseStore> {
   try {
-    const { pool, courseTable } = await getMysqlRuntime();
-    const [rows] = await pool.execute<CourseRow[]>(
-      `SELECT id, name, description, created_at AS createdAt, updated_at AS updatedAt
-       FROM ${courseTable}
-       ORDER BY updated_at DESC`
+    const runtime = await getMysqlRuntime();
+    await replayPendingCourseOperations(runtime);
+    const { pool, courseTable, courseSectionTable } = runtime;
+    const [sectionRows] = await pool.execute<CourseSectionRow[]>(
+      `SELECT id, name, sort_order AS sortOrder, collapsed, created_at AS createdAt, updated_at AS updatedAt
+       FROM ${courseSectionTable}
+       WHERE deleted_at IS NULL
+       ORDER BY sort_order ASC, updated_at DESC`
     );
+    const [rows] = await pool.execute<CourseRow[]>(
+      `SELECT id, name, description, section_id AS sectionId, sort_order AS sortOrder, created_at AS createdAt, updated_at AS updatedAt
+       FROM ${courseTable}
+       WHERE deleted_at IS NULL
+       ORDER BY COALESCE(section_id, ''), sort_order ASC, updated_at DESC`
+    );
+    const sections = sectionRows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      sortOrder: Number(row.sortOrder) || 0,
+      collapsed: Boolean(Number(row.collapsed)),
+      createdAt: toIsoTimestamp(row.createdAt),
+      updatedAt: toIsoTimestamp(row.updatedAt)
+    }));
+    const sectionIds = new Set(sections.map((section) => section.id));
     const courses = rows.map((row) => ({
       id: row.id,
       name: row.name,
       description: row.description,
+      sectionId: row.sectionId && sectionIds.has(row.sectionId) ? row.sectionId : null,
+      sortOrder: Number(row.sortOrder) || 0,
       createdAt: toIsoTimestamp(row.createdAt),
       updatedAt: toIsoTimestamp(row.updatedAt)
     }));
-    const store = { courses, activeCourseId: courses[0]?.id ?? null };
+    let mirroredActiveCourseId: string | null = null;
+    try {
+      const localMirror = await readLocalCourseStore();
+      if (localMirror.activeCourseId && courses.some((course) => course.id === localMirror.activeCourseId)) {
+        mirroredActiveCourseId = localMirror.activeCourseId;
+      }
+    } catch (error) {
+      console.warn("Course local mirror read failed.", error);
+    }
+    const store = { sections, courses, activeCourseId: mirroredActiveCourseId ?? courses[0]?.id ?? null };
     if (courses.length > 0) {
       void writeLocalCourseStore(store).catch((error) => {
         console.warn("Course local mirror write failed.", error);
@@ -2567,23 +3346,65 @@ async function readCourseStore(): Promise<CourseStore> {
   }
 }
 
+async function replaceCourseSectionRows(connection: PoolConnection, sectionTable: string, sections: CourseSectionRecord[]) {
+  if (sections.length === 0) {
+    await connection.execute(`UPDATE ${sectionTable} SET deleted_at = COALESCE(deleted_at, ?) WHERE deleted_at IS NULL`, [new Date()]);
+    return;
+  }
+
+  const ids = sections.map((section) => section.id);
+  await connection.execute(
+    `UPDATE ${sectionTable} SET deleted_at = COALESCE(deleted_at, ?) WHERE deleted_at IS NULL AND id NOT IN (${ids.map(() => "?").join(", ")})`,
+    [new Date(), ...ids]
+  );
+
+  const sql = `
+    INSERT INTO ${sectionTable} (id, name, sort_order, collapsed, created_at, updated_at, deleted_at)
+    VALUES (?, ?, ?, ?, ?, ?, NULL)
+    ON DUPLICATE KEY UPDATE
+      name = VALUES(name),
+      sort_order = VALUES(sort_order),
+      collapsed = VALUES(collapsed),
+      created_at = VALUES(created_at),
+      updated_at = VALUES(updated_at),
+      deleted_at = NULL
+  `;
+
+  for (const section of sections) {
+    await connection.execute(sql, [
+      section.id,
+      section.name,
+      section.sortOrder,
+      section.collapsed ? 1 : 0,
+      toMysqlDate(section.createdAt),
+      toMysqlDate(section.updatedAt)
+    ]);
+  }
+}
+
 async function replaceCourseRows(connection: PoolConnection, courseTable: string, courses: CourseRecord[]) {
   if (courses.length === 0) {
-    await connection.execute(`DELETE FROM ${courseTable}`);
+    await connection.execute(`UPDATE ${courseTable} SET deleted_at = COALESCE(deleted_at, ?) WHERE deleted_at IS NULL`, [new Date()]);
     return;
   }
 
   const ids = courses.map((course) => course.id);
-  await connection.execute(`DELETE FROM ${courseTable} WHERE id NOT IN (${ids.map(() => "?").join(", ")})`, ids);
+  await connection.execute(
+    `UPDATE ${courseTable} SET deleted_at = COALESCE(deleted_at, ?) WHERE deleted_at IS NULL AND id NOT IN (${ids.map(() => "?").join(", ")})`,
+    [new Date(), ...ids]
+  );
 
   const sql = `
-    INSERT INTO ${courseTable} (id, name, description, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO ${courseTable} (id, name, description, section_id, sort_order, created_at, updated_at, deleted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
     ON DUPLICATE KEY UPDATE
       name = VALUES(name),
       description = VALUES(description),
+      section_id = VALUES(section_id),
+      sort_order = VALUES(sort_order),
       created_at = VALUES(created_at),
-      updated_at = VALUES(updated_at)
+      updated_at = VALUES(updated_at),
+      deleted_at = NULL
   `;
 
   for (const course of courses) {
@@ -2591,6 +3412,8 @@ async function replaceCourseRows(connection: PoolConnection, courseTable: string
       course.id,
       course.name,
       course.description,
+      course.sectionId,
+      course.sortOrder,
       toMysqlDate(course.createdAt),
       toMysqlDate(course.updatedAt)
     ]);
@@ -2600,14 +3423,17 @@ async function replaceCourseRows(connection: PoolConnection, courseTable: string
 async function writeCourseStore(store: CourseStore) {
   const normalized = normalizeCourseStore(store);
   try {
-    const { pool, courseTable } = await getMysqlRuntime();
+    const { pool, courseTable, courseSectionTable } = await getMysqlRuntime();
     const connection = await pool.getConnection();
 
     try {
       await connection.beginTransaction();
+      await replaceCourseSectionRows(connection, courseSectionTable, normalized.sections);
       await replaceCourseRows(connection, courseTable, normalized.courses);
       await connection.commit();
-      await writeLocalCourseStore(normalized);
+      void writeLocalCourseStore(normalized).catch((error) => {
+        console.warn("Course local mirror write failed after MySQL save.", error);
+      });
       return normalized;
     } catch (error) {
       await connection.rollback();
@@ -2619,6 +3445,760 @@ async function writeCourseStore(store: CourseStore) {
     console.warn("Course MySQL write failed. Saving to local course store.", error);
     return await writeLocalCourseStore(normalized);
   }
+}
+
+function errorToMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function pendingCourseFromPayload(operation: PendingCourseOperation) {
+  const record = readPendingPayloadRecord(operation, "course");
+  const createdAt = typeof record.createdAt === "string" ? toIsoTimestamp(record.createdAt) : new Date().toISOString();
+  const updatedAt = typeof record.updatedAt === "string" ? toIsoTimestamp(record.updatedAt) : createdAt;
+  const sectionId = nullableStringFromRecord(record, "sectionId");
+  return {
+    id: normalizeId(record.id, "Course id"),
+    name: normalizeCourseName(record.name),
+    description: normalizeCourseDescription(record.description),
+    sectionId: sectionId ? normalizeId(sectionId, "Course section id") : null,
+    sortOrder: numberFromRecord(record, "sortOrder"),
+    createdAt,
+    updatedAt
+  };
+}
+
+function pendingSectionFromPayload(operation: PendingCourseOperation) {
+  const record = readPendingPayloadRecord(operation, "section");
+  const createdAt = typeof record.createdAt === "string" ? toIsoTimestamp(record.createdAt) : new Date().toISOString();
+  const updatedAt = typeof record.updatedAt === "string" ? toIsoTimestamp(record.updatedAt) : createdAt;
+  return {
+    id: normalizeId(record.id, "Course section id"),
+    name: normalizeCourseSectionNameInput(record.name),
+    sortOrder: numberFromRecord(record, "sortOrder"),
+    collapsed: Boolean(record.collapsed),
+    createdAt,
+    updatedAt
+  };
+}
+
+async function applyPendingCourseOperation(connection: PoolConnection, runtime: MysqlRuntime, operation: PendingCourseOperation) {
+  switch (operation.action) {
+    case "course:create": {
+      const course = pendingCourseFromPayload(operation);
+      await connection.execute(
+        `INSERT INTO ${runtime.courseTable} (id, name, description, section_id, sort_order, created_at, updated_at, deleted_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+         ON DUPLICATE KEY UPDATE
+           name = VALUES(name),
+           description = VALUES(description),
+           section_id = VALUES(section_id),
+           sort_order = VALUES(sort_order),
+           created_at = VALUES(created_at),
+           updated_at = VALUES(updated_at),
+           deleted_at = NULL`,
+        [course.id, course.name, course.description, course.sectionId, course.sortOrder, toMysqlDate(course.createdAt), toMysqlDate(course.updatedAt)]
+      );
+      return;
+    }
+    case "course:rename": {
+      const courseId = normalizeId(operation.payload.courseId, "Course id");
+      const name = normalizeCourseName(operation.payload.name);
+      const description = normalizeCourseDescription(operation.payload.description);
+      const updatedAt = readPendingPayloadString(operation, "updatedAt");
+      await connection.execute(
+        `UPDATE ${runtime.courseTable}
+         SET name = ?, description = ?, updated_at = ?
+         WHERE id = ? AND deleted_at IS NULL`,
+        [name, description, toMysqlDate(updatedAt), courseId]
+      );
+      return;
+    }
+    case "course:move": {
+      const courseId = normalizeId(operation.payload.courseId, "Course id");
+      const pendingSectionId = readPendingPayloadOptionalString(operation, "sectionId");
+      const sectionId = pendingSectionId ? normalizeId(pendingSectionId, "Course section id") : null;
+      const sortOrder = readPendingPayloadNumber(operation, "sortOrder");
+      const updatedAt = readPendingPayloadString(operation, "updatedAt");
+      await connection.execute(
+        `UPDATE ${runtime.courseTable}
+         SET section_id = ?, sort_order = ?, updated_at = ?
+         WHERE id = ? AND deleted_at IS NULL`,
+        [sectionId, sortOrder, toMysqlDate(updatedAt), courseId]
+      );
+      return;
+    }
+    case "course:reorder": {
+      for (const movedCourse of readPendingPayloadRecordArray(operation, "courses")) {
+        const sectionId = nullableStringFromRecord(movedCourse, "sectionId");
+        await connection.execute(
+          `UPDATE ${runtime.courseTable}
+           SET section_id = ?, sort_order = ?, updated_at = ?
+           WHERE id = ? AND deleted_at IS NULL`,
+          [
+            sectionId,
+            numberFromRecord(movedCourse, "sortOrder"),
+            toMysqlDate(stringFromRecord(movedCourse, "updatedAt")),
+            normalizeId(movedCourse.id, "Course id")
+          ]
+        );
+      }
+      return;
+    }
+    case "course:delete": {
+      const courseId = normalizeId(operation.payload.courseId, "Course id");
+      const updatedAt = readPendingPayloadString(operation, "updatedAt");
+      await connection.execute(
+        `UPDATE ${runtime.courseTable}
+         SET deleted_at = ?, updated_at = ?
+         WHERE id = ? AND deleted_at IS NULL`,
+        [toMysqlDate(updatedAt), toMysqlDate(updatedAt), courseId]
+      );
+      return;
+    }
+    case "section:create": {
+      const section = pendingSectionFromPayload(operation);
+      await connection.execute(
+        `INSERT INTO ${runtime.courseSectionTable} (id, name, sort_order, collapsed, created_at, updated_at, deleted_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL)
+         ON DUPLICATE KEY UPDATE
+           name = VALUES(name),
+           sort_order = VALUES(sort_order),
+           collapsed = VALUES(collapsed),
+           created_at = VALUES(created_at),
+           updated_at = VALUES(updated_at),
+           deleted_at = NULL`,
+        [section.id, section.name, section.sortOrder, section.collapsed ? 1 : 0, toMysqlDate(section.createdAt), toMysqlDate(section.updatedAt)]
+      );
+      return;
+    }
+    case "section:rename": {
+      const sectionId = normalizeId(operation.payload.sectionId, "Course section id");
+      const name = normalizeCourseSectionNameInput(operation.payload.name);
+      const updatedAt = readPendingPayloadString(operation, "updatedAt");
+      await connection.execute(
+        `UPDATE ${runtime.courseSectionTable}
+         SET name = ?, updated_at = ?
+         WHERE id = ? AND deleted_at IS NULL`,
+        [name, toMysqlDate(updatedAt), sectionId]
+      );
+      return;
+    }
+    case "section:reorder": {
+      for (const movedSection of readPendingPayloadRecordArray(operation, "sections")) {
+        await connection.execute(
+          `UPDATE ${runtime.courseSectionTable}
+           SET sort_order = ?, updated_at = ?
+           WHERE id = ? AND deleted_at IS NULL`,
+          [
+            numberFromRecord(movedSection, "sortOrder"),
+            toMysqlDate(stringFromRecord(movedSection, "updatedAt")),
+            normalizeId(movedSection.id, "Course section id")
+          ]
+        );
+      }
+      return;
+    }
+    case "section:toggle": {
+      const sectionId = normalizeId(operation.payload.sectionId, "Course section id");
+      const collapsed = readPendingPayloadBoolean(operation, "collapsed");
+      const updatedAt = readPendingPayloadString(operation, "updatedAt");
+      await connection.execute(
+        `UPDATE ${runtime.courseSectionTable}
+         SET collapsed = ?, updated_at = ?
+         WHERE id = ? AND deleted_at IS NULL`,
+        [collapsed ? 1 : 0, toMysqlDate(updatedAt), sectionId]
+      );
+      return;
+    }
+    case "section:delete": {
+      const sectionId = normalizeId(operation.payload.sectionId, "Course section id");
+      const updatedAt = readPendingPayloadString(operation, "updatedAt");
+      await connection.execute(
+        `UPDATE ${runtime.courseSectionTable}
+         SET deleted_at = ?, updated_at = ?
+         WHERE id = ? AND deleted_at IS NULL`,
+        [toMysqlDate(updatedAt), toMysqlDate(updatedAt), sectionId]
+      );
+
+      for (const movedCourse of readPendingPayloadRecordArray(operation, "movedCourses")) {
+        await connection.execute(
+          `UPDATE ${runtime.courseTable}
+           SET section_id = NULL, sort_order = ?, updated_at = ?
+           WHERE id = ? AND deleted_at IS NULL`,
+          [
+            numberFromRecord(movedCourse, "sortOrder"),
+            toMysqlDate(stringFromRecord(movedCourse, "updatedAt")),
+            normalizeId(movedCourse.id, "Course id")
+          ]
+        );
+      }
+      return;
+    }
+    default:
+      throw new Error(`Unsupported pending course operation: ${operation.action}`);
+  }
+}
+
+async function replayPendingCourseOperations(runtime: MysqlRuntime) {
+  const operations = await readPendingCourseOperations();
+  if (operations.length === 0) return;
+
+  for (let index = 0; index < operations.length; index += 1) {
+    const operation = operations[index];
+    const connection = await runtime.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await applyPendingCourseOperation(connection, runtime, operation);
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      await writePendingCourseOperations([
+        {
+          ...operation,
+          retryCount: operation.retryCount + 1,
+          lastError: errorToMessage(error).slice(0, 500)
+        },
+        ...operations.slice(index + 1)
+      ]);
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  await writePendingCourseOperations([]);
+}
+
+function normalizeCourseName(value: unknown) {
+  const name = typeof value === "string" ? value.trim().slice(0, 40) : "";
+  if (!name) {
+    throw new Error("课程名称不能为空。");
+  }
+  return name;
+}
+
+function normalizeCourseDescription(value: unknown) {
+  return typeof value === "string" ? value.trim().slice(0, 120) : "";
+}
+
+function normalizeCourseSectionNameInput(value: unknown) {
+  const name = typeof value === "string" ? value.trim().slice(0, 40) : "";
+  if (!name) {
+    throw new Error("分区名称不能为空。");
+  }
+  return name;
+}
+
+function assertUniqueCourseSectionName(store: CourseStore, name: string, ignoreId?: string) {
+  if (store.sections.some((section) => section.id !== ignoreId && section.name === name)) {
+    throw new Error("分区名称已存在。");
+  }
+}
+
+function getNextCourseSortOrder(courses: CourseRecord[], sectionId: string | null) {
+  const siblings = courses.filter((course) => (course.sectionId ?? null) === sectionId);
+  if (siblings.length === 0) return 0;
+  return Math.max(...siblings.map((course) => Number.isFinite(course.sortOrder) ? course.sortOrder : 0)) + 1;
+}
+
+function getNextCourseSectionSortOrder(sections: CourseSectionRecord[]) {
+  if (sections.length === 0) return 0;
+  return Math.max(...sections.map((section) => Number.isFinite(section.sortOrder) ? section.sortOrder : 0)) + 1;
+}
+
+function insertBeforeId<T extends { id: string }>(items: T[], movingId: string, beforeId: string | null) {
+  const moving = items.find((item) => item.id === movingId);
+  if (!moving) return null;
+  const withoutMoving = items.filter((item) => item.id !== movingId);
+  const insertIndex = beforeId ? withoutMoving.findIndex((item) => item.id === beforeId) : -1;
+  const next = [...withoutMoving];
+  next.splice(insertIndex >= 0 ? insertIndex : next.length, 0, moving);
+  return next;
+}
+
+function sortByCourseOrder<T extends { sortOrder: number; updatedAt: string }>(items: T[]) {
+  return [...items].sort((first, second) => {
+    const orderDelta = (Number.isFinite(first.sortOrder) ? first.sortOrder : 0) - (Number.isFinite(second.sortOrder) ? second.sortOrder : 0);
+    if (orderDelta !== 0) return orderDelta;
+    return new Date(second.updatedAt).getTime() - new Date(first.updatedAt).getTime();
+  });
+}
+
+function normalizeTargetSectionId(store: CourseStore, value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+  const sectionId = normalizeId(value, "Course section id");
+  return store.sections.some((section) => section.id === sectionId) ? sectionId : null;
+}
+
+async function writeAndNormalizeLocalCourseStore(store: CourseStore) {
+  return await writeLocalCourseStore(normalizeCourseStore(store));
+}
+
+async function writeLocalCourseStoreWithPending(
+  store: CourseStore,
+  action: PendingCourseOperation["action"],
+  payload: Record<string, unknown>
+) {
+  const normalized = await writeAndNormalizeLocalCourseStore(store);
+  try {
+    await appendPendingCourseOperation(action, payload);
+  } catch (error) {
+    console.warn("Course pending operation write failed. Local store was preserved.", error);
+  }
+  return normalized;
+}
+
+async function createCourseSectionCommand(input: CourseSectionNameRequest): Promise<CourseStore> {
+  const current = await readCourseStore();
+  const name = normalizeCourseSectionNameInput(input?.name);
+  assertUniqueCourseSectionName(current, name);
+  const now = new Date().toISOString();
+  const section: CourseSectionRecord = {
+    id: randomUUID(),
+    name,
+    sortOrder: getNextCourseSectionSortOrder(current.sections),
+    collapsed: false,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  try {
+    const { pool, courseSectionTable } = await getMysqlRuntime();
+    await pool.execute(
+      `INSERT INTO ${courseSectionTable} (id, name, sort_order, collapsed, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, NULL)`,
+      [section.id, section.name, section.sortOrder, 0, toMysqlDate(section.createdAt), toMysqlDate(section.updatedAt)]
+    );
+    return await readCourseStore();
+  } catch (error) {
+    console.warn("Course section create fell back to local store.", error);
+    return await writeLocalCourseStoreWithPending(
+      { ...current, sections: [...current.sections, section] },
+      "section:create",
+      { section }
+    );
+  }
+}
+
+async function renameCourseSectionCommand(input: CourseSectionRenameRequest): Promise<CourseStore> {
+  const current = await readCourseStore();
+  const sectionId = normalizeId(input?.id, "Course section id");
+  const name = normalizeCourseSectionNameInput(input?.name);
+  if (!current.sections.some((section) => section.id === sectionId)) {
+    throw new Error("分区不存在。");
+  }
+  assertUniqueCourseSectionName(current, name, sectionId);
+  const updatedAt = new Date().toISOString();
+
+  try {
+    const { pool, courseSectionTable } = await getMysqlRuntime();
+    await pool.execute(
+      `UPDATE ${courseSectionTable}
+       SET name = ?, updated_at = ?
+       WHERE id = ? AND deleted_at IS NULL`,
+      [name, toMysqlDate(updatedAt), sectionId]
+    );
+    return await readCourseStore();
+  } catch (error) {
+    console.warn("Course section rename fell back to local store.", error);
+    return await writeLocalCourseStoreWithPending(
+      {
+        ...current,
+        sections: current.sections.map((section) => section.id === sectionId ? { ...section, name, updatedAt } : section)
+      },
+      "section:rename",
+      { sectionId, name, updatedAt }
+    );
+  }
+}
+
+async function toggleCourseSectionCommand(input: CourseSectionToggleRequest): Promise<CourseStore> {
+  const current = await readCourseStore();
+  const sectionId = normalizeId(input?.id, "Course section id");
+  const section = current.sections.find((item) => item.id === sectionId);
+  if (!section) {
+    throw new Error("分区不存在。");
+  }
+  const collapsed = typeof input?.collapsed === "boolean" ? input.collapsed : !section.collapsed;
+  const updatedAt = new Date().toISOString();
+
+  try {
+    const { pool, courseSectionTable } = await getMysqlRuntime();
+    await pool.execute(
+      `UPDATE ${courseSectionTable}
+       SET collapsed = ?, updated_at = ?
+       WHERE id = ? AND deleted_at IS NULL`,
+      [collapsed ? 1 : 0, toMysqlDate(updatedAt), sectionId]
+    );
+    return await readCourseStore();
+  } catch (error) {
+    console.warn("Course section toggle fell back to local store.", error);
+    return await writeLocalCourseStoreWithPending(
+      {
+        ...current,
+        sections: current.sections.map((item) => item.id === sectionId ? { ...item, collapsed, updatedAt } : item)
+      },
+      "section:toggle",
+      { sectionId, collapsed, updatedAt }
+    );
+  }
+}
+
+async function reorderCourseSectionCommand(input: CourseSectionReorderRequest): Promise<CourseStore> {
+  const current = await readCourseStore();
+  const sectionId = normalizeId(input?.id, "Course section id");
+  const beforeSectionId = input?.beforeSectionId === null || input?.beforeSectionId === undefined || input?.beforeSectionId === ""
+    ? null
+    : normalizeId(input.beforeSectionId, "Before course section id");
+  if (!current.sections.some((section) => section.id === sectionId)) {
+    throw new Error("分区不存在。");
+  }
+  if (beforeSectionId && !current.sections.some((section) => section.id === beforeSectionId)) {
+    throw new Error("分区不存在。");
+  }
+  if (sectionId === beforeSectionId) return current;
+
+  const now = new Date().toISOString();
+  const ordered = insertBeforeId(sortByCourseOrder(current.sections), sectionId, beforeSectionId);
+  if (!ordered) throw new Error("分区不存在。");
+  const nextSections = ordered.map((section, index) => ({
+    ...section,
+    sortOrder: index,
+    updatedAt: section.id === sectionId || section.sortOrder !== index ? now : section.updatedAt
+  }));
+  const changedSections = nextSections.filter((section) => {
+    const previous = current.sections.find((item) => item.id === section.id);
+    return previous && (previous.sortOrder !== section.sortOrder || previous.updatedAt !== section.updatedAt);
+  });
+  const nextStore = normalizeCourseStore({ ...current, sections: nextSections });
+
+  try {
+    const { pool, courseSectionTable } = await getMysqlRuntime();
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      for (const section of changedSections) {
+        await connection.execute(
+          `UPDATE ${courseSectionTable}
+           SET sort_order = ?, updated_at = ?
+           WHERE id = ? AND deleted_at IS NULL`,
+          [section.sortOrder, toMysqlDate(section.updatedAt), section.id]
+        );
+      }
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+    return await readCourseStore();
+  } catch (error) {
+    console.warn("Course section reorder fell back to local store.", error);
+    return await writeLocalCourseStoreWithPending(
+      nextStore,
+      "section:reorder",
+      {
+        sections: changedSections.map((section) => ({ id: section.id, sortOrder: section.sortOrder, updatedAt: section.updatedAt }))
+      }
+    );
+  }
+}
+
+async function deleteCourseSectionCommand(sectionIdValue: unknown): Promise<CourseStore> {
+  const current = await readCourseStore();
+  const sectionId = normalizeId(sectionIdValue, "Course section id");
+  if (!current.sections.some((section) => section.id === sectionId)) {
+    throw new Error("分区不存在。");
+  }
+  const now = new Date().toISOString();
+  let nextUnsectionedOrder = getNextCourseSortOrder(current.courses, null);
+  const nextStore = normalizeCourseStore({
+    ...current,
+    sections: current.sections.filter((section) => section.id !== sectionId),
+    courses: current.courses.map((course) => {
+      if (course.sectionId !== sectionId) return course;
+      const movedCourse = { ...course, sectionId: null, sortOrder: nextUnsectionedOrder, updatedAt: now };
+      nextUnsectionedOrder += 1;
+      return movedCourse;
+    })
+  });
+
+  try {
+    const { pool, courseTable, courseSectionTable } = await getMysqlRuntime();
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await connection.execute(`UPDATE ${courseSectionTable} SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`, [
+        toMysqlDate(now),
+        toMysqlDate(now),
+        sectionId
+      ]);
+      for (const course of nextStore.courses.filter((course) => current.courses.some((item) => item.id === course.id && item.sectionId === sectionId))) {
+        await connection.execute(
+          `UPDATE ${courseTable}
+           SET section_id = NULL, sort_order = ?, updated_at = ?
+           WHERE id = ? AND deleted_at IS NULL`,
+          [course.sortOrder, toMysqlDate(course.updatedAt), course.id]
+        );
+      }
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+    return await readCourseStore();
+  } catch (error) {
+    console.warn("Course section delete fell back to local store.", error);
+    return await writeLocalCourseStoreWithPending(
+      nextStore,
+      "section:delete",
+      {
+        sectionId,
+        updatedAt: now,
+        movedCourses: nextStore.courses
+          .filter((course) => current.courses.some((item) => item.id === course.id && item.sectionId === sectionId))
+          .map((course) => ({ id: course.id, sortOrder: course.sortOrder, updatedAt: course.updatedAt }))
+      }
+    );
+  }
+}
+
+async function createCourseCommand(input: CourseCreateRequest): Promise<CourseStore> {
+  const current = await readCourseStore();
+  const name = normalizeCourseName(input?.name);
+  const description = normalizeCourseDescription(input?.description);
+  const sectionId = normalizeTargetSectionId(current, input?.sectionId);
+  const now = new Date().toISOString();
+  const course: CourseRecord = {
+    id: randomUUID(),
+    name,
+    description,
+    sectionId,
+    sortOrder: getNextCourseSortOrder(current.courses, sectionId),
+    createdAt: now,
+    updatedAt: now
+  };
+
+  try {
+    const { pool, courseTable } = await getMysqlRuntime();
+    await pool.execute(
+      `INSERT INTO ${courseTable} (id, name, description, section_id, sort_order, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+      [course.id, course.name, course.description, course.sectionId, course.sortOrder, toMysqlDate(course.createdAt), toMysqlDate(course.updatedAt)]
+    );
+    const refreshed = await readCourseStore();
+    const nextStore = normalizeCourseStore({ ...refreshed, activeCourseId: course.id });
+    void writeLocalCourseStore(nextStore).catch((error) => {
+      console.warn("Course local active selection write failed after MySQL create.", error);
+    });
+    return nextStore;
+  } catch (error) {
+    console.warn("Course create fell back to local store.", error);
+    return await writeLocalCourseStoreWithPending(
+      { ...current, courses: [course, ...current.courses], activeCourseId: course.id },
+      "course:create",
+      { course }
+    );
+  }
+}
+
+async function renameCourseCommand(input: CourseRenameRequest): Promise<CourseStore> {
+  const current = await readCourseStore();
+  const courseId = normalizeId(input?.id, "Course id");
+  const name = normalizeCourseName(input?.name);
+  const description = normalizeCourseDescription(input?.description);
+  if (!current.courses.some((course) => course.id === courseId)) {
+    throw new Error("课程不存在。");
+  }
+  const updatedAt = new Date().toISOString();
+
+  try {
+    const { pool, courseTable } = await getMysqlRuntime();
+    await pool.execute(
+      `UPDATE ${courseTable}
+       SET name = ?, description = ?, updated_at = ?
+       WHERE id = ? AND deleted_at IS NULL`,
+      [name, description, toMysqlDate(updatedAt), courseId]
+    );
+    return await readCourseStore();
+  } catch (error) {
+    console.warn("Course rename fell back to local store.", error);
+    return await writeLocalCourseStoreWithPending(
+      {
+        ...current,
+        courses: current.courses.map((course) => course.id === courseId ? { ...course, name, description, updatedAt } : course)
+      },
+      "course:rename",
+      { courseId, name, description, updatedAt }
+    );
+  }
+}
+
+async function moveCourseCommand(input: CourseMoveRequest): Promise<CourseStore> {
+  const current = await readCourseStore();
+  const courseId = normalizeId(input?.id, "Course id");
+  const sectionId = normalizeTargetSectionId(current, input?.sectionId);
+  const course = current.courses.find((item) => item.id === courseId);
+  if (!course) {
+    throw new Error("课程不存在。");
+  }
+  if ((course.sectionId ?? null) === sectionId) {
+    return current;
+  }
+  const updatedAt = new Date().toISOString();
+  const sortOrder = getNextCourseSortOrder(current.courses.filter((item) => item.id !== courseId), sectionId);
+
+  try {
+    const { pool, courseTable } = await getMysqlRuntime();
+    await pool.execute(
+      `UPDATE ${courseTable}
+       SET section_id = ?, sort_order = ?, updated_at = ?
+       WHERE id = ? AND deleted_at IS NULL`,
+      [sectionId, sortOrder, toMysqlDate(updatedAt), courseId]
+    );
+    return await readCourseStore();
+  } catch (error) {
+    console.warn("Course move fell back to local store.", error);
+    return await writeLocalCourseStoreWithPending(
+      {
+        ...current,
+        courses: current.courses.map((item) => item.id === courseId ? { ...item, sectionId, sortOrder, updatedAt } : item)
+      },
+      "course:move",
+      { courseId, sectionId, sortOrder, updatedAt }
+    );
+  }
+}
+
+async function reorderCourseCommand(input: CourseReorderRequest): Promise<CourseStore> {
+  const current = await readCourseStore();
+  const courseId = normalizeId(input?.id, "Course id");
+  const sectionId = normalizeTargetSectionId(current, input?.sectionId);
+  const beforeCourseId = input?.beforeCourseId === null || input?.beforeCourseId === undefined || input?.beforeCourseId === ""
+    ? null
+    : normalizeId(input.beforeCourseId, "Before course id");
+  const course = current.courses.find((item) => item.id === courseId);
+  if (!course) {
+    throw new Error("课程不存在。");
+  }
+  if (beforeCourseId && !current.courses.some((item) => item.id === beforeCourseId)) {
+    throw new Error("课程不存在。");
+  }
+  if (courseId === beforeCourseId) return current;
+
+  const now = new Date().toISOString();
+  const sourceSectionId = course.sectionId ?? null;
+  const targetSectionId = beforeCourseId
+    ? current.courses.find((item) => item.id === beforeCourseId)?.sectionId ?? sectionId
+    : sectionId;
+  const movedCourse = { ...course, sectionId: targetSectionId, updatedAt: now };
+  const unchangedCourses = current.courses.filter((item) => item.id !== courseId);
+  const targetSiblings = sortByCourseOrder(
+    [...unchangedCourses.filter((item) => (item.sectionId ?? null) === targetSectionId), movedCourse]
+  );
+  const orderedTargetSiblings = insertBeforeId(targetSiblings, courseId, beforeCourseId) ?? targetSiblings;
+  const changedIds = new Set<string>([courseId]);
+  const reorderedTarget = orderedTargetSiblings.map((item, index) => {
+    if (item.sortOrder !== index || (item.sectionId ?? null) !== targetSectionId) changedIds.add(item.id);
+    return { ...item, sectionId: targetSectionId, sortOrder: index, updatedAt: changedIds.has(item.id) ? now : item.updatedAt };
+  });
+  const sourceReordered = sourceSectionId === targetSectionId
+    ? []
+    : sortByCourseOrder(unchangedCourses.filter((item) => (item.sectionId ?? null) === sourceSectionId)).map((item, index) => {
+        if (item.sortOrder !== index) changedIds.add(item.id);
+        return { ...item, sortOrder: index, updatedAt: item.sortOrder !== index ? now : item.updatedAt };
+      });
+  const replacement = new Map([...reorderedTarget, ...sourceReordered].map((item) => [item.id, item]));
+  const nextCourses = current.courses.map((item) => replacement.get(item.id) ?? item);
+  const changedCourses = nextCourses.filter((item) => changedIds.has(item.id));
+  const nextStore = normalizeCourseStore({ ...current, courses: nextCourses });
+
+  try {
+    const { pool, courseTable } = await getMysqlRuntime();
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      for (const item of changedCourses) {
+        await connection.execute(
+          `UPDATE ${courseTable}
+           SET section_id = ?, sort_order = ?, updated_at = ?
+           WHERE id = ? AND deleted_at IS NULL`,
+          [item.sectionId, item.sortOrder, toMysqlDate(item.updatedAt), item.id]
+        );
+      }
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+    return await readCourseStore();
+  } catch (error) {
+    console.warn("Course reorder fell back to local store.", error);
+    return await writeLocalCourseStoreWithPending(
+      nextStore,
+      "course:reorder",
+      {
+        courses: changedCourses.map((item) => ({
+          id: item.id,
+          sectionId: item.sectionId,
+          sortOrder: item.sortOrder,
+          updatedAt: item.updatedAt
+        }))
+      }
+    );
+  }
+}
+
+async function deleteCourseCommand(courseIdValue: unknown): Promise<CourseStore> {
+  const current = await readCourseStore();
+  const courseId = normalizeId(courseIdValue, "Course id");
+  if (!current.courses.some((course) => course.id === courseId)) {
+    throw new Error("课程不存在。");
+  }
+  const now = new Date().toISOString();
+  const nextActiveCourseId = current.activeCourseId === courseId
+    ? current.courses.find((course) => course.id !== courseId)?.id ?? null
+    : current.activeCourseId;
+
+  try {
+    const { pool, courseTable } = await getMysqlRuntime();
+    await pool.execute(`UPDATE ${courseTable} SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`, [
+      toMysqlDate(now),
+      toMysqlDate(now),
+      courseId
+    ]);
+    const refreshed = await readCourseStore();
+    const nextStore = normalizeCourseStore({ ...refreshed, activeCourseId: nextActiveCourseId });
+    void writeLocalCourseStore(nextStore).catch((error) => {
+      console.warn("Course local active selection write failed after MySQL delete.", error);
+    });
+    return nextStore;
+  } catch (error) {
+    console.warn("Course delete fell back to local store.", error);
+    return await writeLocalCourseStoreWithPending(
+      {
+        ...current,
+        courses: current.courses.filter((course) => course.id !== courseId),
+        activeCourseId: nextActiveCourseId
+      },
+      "course:delete",
+      { courseId, updatedAt: now }
+    );
+  }
+}
+
+async function selectCourseCommand(courseIdValue: unknown): Promise<CourseStore> {
+  const current = await readCourseStore();
+  const courseId = courseIdValue === null || courseIdValue === undefined || courseIdValue === ""
+    ? null
+    : normalizeId(courseIdValue, "Course id");
+  const activeCourseId = courseId && current.courses.some((course) => course.id === courseId) ? courseId : null;
+  return await writeAndNormalizeLocalCourseStore({ ...current, activeCourseId });
 }
 
 function getNonEmptyString(value: unknown, fallback = "") {
@@ -2661,22 +4241,72 @@ function createSnapshotContentHash<T extends { updatedAt: string }>(snapshot: T)
   return createHash("sha256").update(JSON.stringify({ ...snapshot, updatedAt: "" })).digest("hex");
 }
 
+function assertSnapshotRetentionLimit(value: number, label: string) {
+  if (!Number.isInteger(value) || value < 1 || value > 100) {
+    throw createAppError("APP_CONFIG_INVALID", `${label} snapshot retention limit is invalid.`);
+  }
+}
+
+function findOversizedInlineDataUrl(value: unknown): string | null {
+  if (typeof value === "string") {
+    return INLINE_DATA_URL_PATTERN.test(value) && Buffer.byteLength(value, "utf8") > AISTUDY_CORE_CONTRACT.storage.maxInlineDataUrlBytes
+      ? value.slice(0, 48)
+      : null;
+  }
+  if (Array.isArray(value)) {
+    for (const child of value) {
+      const found = findOversizedInlineDataUrl(child);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (!isRecord(value)) return null;
+  for (const child of Object.values(value)) {
+    const found = findOversizedInlineDataUrl(child);
+    if (found) return found;
+  }
+  return null;
+}
+
+function assertSnapshotStorageContract(
+  label: "Mind map" | "Knowledge document",
+  snapshot: unknown,
+  byteSize: number,
+  maxByteSize: number
+) {
+  if (byteSize > maxByteSize) {
+    throw createAppError(
+      label === "Mind map" ? "MINDMAP_SNAPSHOT_TOO_LARGE" : "DOCUMENT_SNAPSHOT_TOO_LARGE",
+      `${label} snapshot exceeds ${maxByteSize} bytes.`,
+      { byteSize, maxByteSize }
+    );
+  }
+  const inlineDataUrl = findOversizedInlineDataUrl(snapshot);
+  if (inlineDataUrl) {
+    throw createAppError(
+      label === "Mind map" ? "MINDMAP_INLINE_ASSET_BLOCKED" : "DOCUMENT_INLINE_ASSET_BLOCKED",
+      `${label} snapshot contains oversized inline base64 asset: ${inlineDataUrl}`,
+      { inlineDataUrlPrefix: inlineDataUrl }
+    );
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function normalizeMindMapSnapshot(value: unknown): MindMapSnapshot {
   if (!isRecord(value)) {
-    throw new Error("Mind map snapshot must be an object.");
+    throw createAppError("MINDMAP_SNAPSHOT_INVALID", "Mind map snapshot must be an object.");
   }
 
   const root = value.root;
   if (!isRecord(root)) {
-    throw new Error("Mind map snapshot root is missing.");
+    throw createAppError("MINDMAP_SNAPSHOT_INVALID", "Mind map snapshot root is missing.");
   }
 
   if (value.schemaVersion !== AISTUDY_CORE_CONTRACT.schemaVersion || value.editor !== AISTUDY_CORE_CONTRACT.editors.mindMap) {
-    throw new Error("Unsupported mind map snapshot format.");
+    throw createAppError("MINDMAP_SNAPSHOT_INVALID", "Unsupported mind map snapshot format.");
   }
 
   return {
@@ -2693,7 +4323,7 @@ function normalizeMindMapSnapshot(value: unknown): MindMapSnapshot {
 
 function normalizeMindMapSaveRequest(value: unknown): MindMapSaveRequest & { courseId: string; snapshot: MindMapSnapshot } {
   if (!isRecord(value)) {
-    throw new Error("Mind map save request must be an object.");
+    throw createAppError("MINDMAP_REQUEST_INVALID", "Mind map save request must be an object.");
   }
 
   return {
@@ -2820,6 +4450,7 @@ async function pruneOldSnapshots(
   ownerId: string,
   keepLimit: number
 ) {
+  assertSnapshotRetentionLimit(keepLimit, ownerColumn);
   await connection.execute(
     `DELETE FROM ${snapshotTable}
      WHERE ${ownerColumn} = ?
@@ -2961,6 +4592,7 @@ async function writeMindMapDocument(input: unknown): Promise<MindMapDocument> {
     const payloadJson = createSnapshotPayloadJson(request.snapshot, updatedAt);
     const payloadHash = createSnapshotContentHash(request.snapshot);
     const byteSize = Buffer.byteLength(payloadJson, "utf8");
+    assertSnapshotStorageContract("Mind map", request.snapshot, byteSize, AISTUDY_CORE_CONTRACT.mindMap.maxSnapshotBytes);
 
     const currentSnapshotMeta = existing?.currentSnapshotId
       ? await readSnapshotMeta(connection, mindMapSnapshotTable, existing.currentSnapshotId, "mind_map_id", mapId)
@@ -2993,8 +4625,8 @@ async function writeMindMapDocument(input: unknown): Promise<MindMapDocument> {
           snapshotId,
           mapId,
           sequenceNo,
-          request.snapshot.schemaVersion,
-          request.snapshot.editor,
+          AISTUDY_CORE_CONTRACT.schemaVersion,
+          AISTUDY_CORE_CONTRACT.editors.mindMap,
           request.snapshot.editorVersion,
           payloadJson,
           payloadHash,
@@ -3034,14 +4666,14 @@ async function writeMindMapDocument(input: unknown): Promise<MindMapDocument> {
 
 function normalizeKnowledgeDocumentSnapshot(value: unknown): KnowledgeDocumentSnapshot {
   if (!isRecord(value)) {
-    throw new Error("Knowledge document snapshot must be an object.");
+    throw createAppError("DOCUMENT_SNAPSHOT_INVALID", "Knowledge document snapshot must be an object.");
   }
 
   if (
     value.schemaVersion !== AISTUDY_CORE_CONTRACT.schemaVersion ||
     value.editor !== AISTUDY_CORE_CONTRACT.editors.knowledgeDocument
   ) {
-    throw new Error("Unsupported knowledge document snapshot format.");
+    throw createAppError("DOCUMENT_SNAPSHOT_INVALID", "Unsupported knowledge document snapshot format.");
   }
 
   return {
@@ -3091,7 +4723,7 @@ function knowledgeDocumentSnapshotHasContent(snapshot: KnowledgeDocumentSnapshot
 
 function normalizeKnowledgeDocumentNodeRequest(value: unknown): KnowledgeDocumentNodeRequest {
   if (!isRecord(value)) {
-    throw new Error("Knowledge document request must be an object.");
+    throw createAppError("DOCUMENT_REQUEST_INVALID", "Knowledge document request must be an object.");
   }
 
   return {
@@ -3103,7 +4735,7 @@ function normalizeKnowledgeDocumentNodeRequest(value: unknown): KnowledgeDocumen
 
 function normalizeKnowledgeDocumentStatusRequest(value: unknown): KnowledgeDocumentStatusRequest {
   if (!isRecord(value)) {
-    throw new Error("Knowledge document status request must be an object.");
+    throw createAppError("DOCUMENT_REQUEST_INVALID", "Knowledge document status request must be an object.");
   }
 
   return {
@@ -3179,7 +4811,7 @@ async function assertMindMapNodeExists(
     [request.courseId, request.mindMapId, request.nodeId]
   );
   if (!rows[0]) {
-    throw new Error("Mind map node is missing. Save the mind map before writing node details.");
+    throw createAppError("DOCUMENT_NODE_MISSING", "Mind map node is missing. Save the mind map before writing node details.");
   }
 }
 
@@ -3245,6 +4877,12 @@ async function writeKnowledgeDocument(input: unknown): Promise<KnowledgeDocument
     const payloadJson = createSnapshotPayloadJson(request.snapshot, updatedAt);
     const payloadHash = createSnapshotContentHash(request.snapshot);
     const byteSize = Buffer.byteLength(payloadJson, "utf8");
+    assertSnapshotStorageContract(
+      "Knowledge document",
+      request.snapshot,
+      byteSize,
+      AISTUDY_CORE_CONTRACT.knowledgeDocument.maxSnapshotBytes
+    );
     const hasContent = knowledgeDocumentSnapshotHasContent(request.snapshot);
 
     const currentSnapshotMeta = existing?.currentSnapshotId
@@ -3288,8 +4926,8 @@ async function writeKnowledgeDocument(input: unknown): Promise<KnowledgeDocument
           snapshotId,
           documentId,
           sequenceNo,
-          request.snapshot.schemaVersion,
-          request.snapshot.editor,
+          AISTUDY_CORE_CONTRACT.schemaVersion,
+          AISTUDY_CORE_CONTRACT.editors.knowledgeDocument,
           request.snapshot.editorVersion,
           payloadJson,
           payloadHash,
@@ -3402,6 +5040,22 @@ app.on("will-quit", () => {
   void mysqlRuntime?.pool.end();
 });
 
+function withUserFacingError<TResult>(
+  source: string,
+  userMessage: string,
+  handler: (...args: unknown[]) => Promise<TResult> | TResult
+) {
+  return async (...args: unknown[]) => {
+    try {
+      return await handler(...args);
+    } catch (error) {
+      const classified = classifyAppError(source, error, userMessage);
+      await recordAppError({ source, userMessage: classified.userMessage, error });
+      throw new Error(classified.userMessage);
+    }
+  };
+}
+
 ipcMain.handle("window:minimize", (event) => {
   getEventWindow(event)?.minimize();
 });
@@ -3429,65 +5083,102 @@ ipcMain.handle("app:before-close-complete", (_event, token: unknown) => {
   return true;
 });
 
-ipcMain.handle("courses:load", () => readCourseStore());
+ipcMain.handle("courses:load", withUserFacingError("courses:load", "课程读取没有完成，请稍后再试。", () => readCourseStore()));
 
-ipcMain.handle("courses:save", (_event, store: CourseStore) => writeCourseStore(store));
+ipcMain.handle("courses:save", withUserFacingError("courses:save", "课程保存没有完成，请稍后再试。", (_event, store) => writeCourseStore(store as CourseStore)));
 
-ipcMain.handle("mindmaps:load", (_event, courseId: unknown) => readMindMapDocument(courseId));
+ipcMain.handle("courses:create", withUserFacingError("courses:create", "课程创建没有完成，请稍后再试。", (_event, input) => createCourseCommand(input as CourseCreateRequest)));
 
-ipcMain.handle("mindmaps:save", (_event, request: unknown) => writeMindMapDocument(request));
+ipcMain.handle("courses:rename", withUserFacingError("courses:rename", "课程重命名没有完成，请稍后再试。", (_event, input) => renameCourseCommand(input as CourseRenameRequest)));
 
-ipcMain.handle("knowledge-documents:load", (_event, request: unknown) => readKnowledgeDocument(request));
+ipcMain.handle("courses:move", withUserFacingError("courses:move", "课程移动没有完成，请稍后再试。", (_event, input) => moveCourseCommand(input as CourseMoveRequest)));
 
-ipcMain.handle("knowledge-documents:list-statuses", (_event, request: unknown) => listKnowledgeDocumentStatuses(request));
+ipcMain.handle("courses:reorder", withUserFacingError("courses:reorder", "课程排序没有完成，请稍后再试。", (_event, input) => reorderCourseCommand(input as CourseReorderRequest)));
 
-ipcMain.handle("knowledge-documents:save", (_event, request: unknown) => writeKnowledgeDocument(request));
+ipcMain.handle("courses:delete", withUserFacingError("courses:delete", "课程删除没有完成，请稍后再试。", (_event, courseId) => deleteCourseCommand(courseId)));
 
-ipcMain.handle("chrome-ports:status", () => getChromePortStatuses());
+ipcMain.handle("courses:select", withUserFacingError("courses:select", "课程切换没有完成，请稍后再试。", (_event, courseId) => selectCourseCommand(courseId)));
 
-ipcMain.handle("chrome-ports:open-login", (_event, platformId: unknown) => openChromePortLogin(platformId));
+ipcMain.handle("courses:sync-status", withUserFacingError("courses:sync-status", "保存状态暂时无法读取。", () => getCourseSyncStatus()));
+
+ipcMain.handle("course-sections:create", withUserFacingError("course-sections:create", "分区创建没有完成，请稍后再试。", (_event, input) => createCourseSectionCommand(input as CourseSectionNameRequest)));
+
+ipcMain.handle("course-sections:rename", withUserFacingError("course-sections:rename", "分区重命名没有完成，请稍后再试。", (_event, input) => renameCourseSectionCommand(input as CourseSectionRenameRequest)));
+
+ipcMain.handle("course-sections:toggle", withUserFacingError("course-sections:toggle", "分区折叠状态没有保存，请稍后再试。", (_event, input) => toggleCourseSectionCommand(input as CourseSectionToggleRequest)));
+
+ipcMain.handle("course-sections:reorder", withUserFacingError("course-sections:reorder", "分区排序没有完成，请稍后再试。", (_event, input) => reorderCourseSectionCommand(input as CourseSectionReorderRequest)));
+
+ipcMain.handle("course-sections:delete", withUserFacingError("course-sections:delete", "分区删除没有完成，请稍后再试。", (_event, sectionId) => deleteCourseSectionCommand(sectionId)));
+
+ipcMain.handle("mindmaps:load", withUserFacingError("mindmaps:load", "导图读取没有完成，请稍后再试。", (_event, courseId) => readMindMapDocument(courseId)));
+
+ipcMain.handle("mindmaps:save", withUserFacingError("mindmaps:save", "导图保存没有完成，请稍后再试。", (_event, request) => writeMindMapDocument(request)));
+
+ipcMain.handle("knowledge-documents:load", withUserFacingError("knowledge-documents:load", "文档读取没有完成，请稍后再试。", (_event, request) => readKnowledgeDocument(request)));
+
+ipcMain.handle("knowledge-documents:list-statuses", withUserFacingError("knowledge-documents:list-statuses", "文档状态读取没有完成，请稍后再试。", (_event, request) => listKnowledgeDocumentStatuses(request)));
+
+ipcMain.handle("knowledge-documents:save", withUserFacingError("knowledge-documents:save", "文档保存没有完成，请稍后再试。", (_event, request) => writeKnowledgeDocument(request)));
+
+ipcMain.handle("chrome-ports:status", withUserFacingError("chrome-ports:status", "端口状态读取没有完成，请稍后再试。", () => getChromePortStatuses()));
+
+ipcMain.handle("chrome-ports:open-login", withUserFacingError("chrome-ports:open-login", "登录窗口没有打开，请稍后再试。", (_event, platformId) => openChromePortLogin(platformId)));
+
+ipcMain.handle("error-logs:list", withUserFacingError("error-logs:list", "报错日志暂时无法读取。", (_event, limit) => listAppErrorLogs(limit)));
+
+ipcMain.handle("runtime:diagnose", withUserFacingError("runtime:diagnose", "环境检查没有完成，请稍后再试。", () => diagnoseRuntime()));
+
+ipcMain.handle("runtime:open-data-root", withUserFacingError("runtime:open-data-root", "数据目录暂时无法打开。", () => openAistudyDataRoot()));
 
 ipcMain.handle("ai-chat:send", async (_event, request: unknown) => {
   try {
     return await sendAiChat(request);
   } catch (error) {
     const provider = request && typeof request === "object" && (request as AiChatRequest).provider === "chatgpt" ? "chatgpt" : "doubao";
+    const userMessage = "AI 回复暂时没有完成，请稍后再试。";
+    await recordAppError({
+      source: "ai-chat:send",
+      userMessage,
+      error,
+      context: { provider }
+    });
     return {
       ok: false,
       provider,
       reply: "",
-      error: error instanceof Error ? error.message : "AI 聊天请求失败"
+      error: userMessage
     } satisfies AiChatResult;
   }
 });
 
-ipcMain.handle("updates:info", () => getUpdateManagerInfo());
+ipcMain.handle("updates:info", withUserFacingError("updates:info", "更新信息暂时无法读取。", () => getUpdateManagerInfo()));
 
-ipcMain.handle("updates:open-repository", async () => {
+ipcMain.handle("updates:open-repository", withUserFacingError("updates:open-repository", "仓库页面暂时无法打开。", async () => {
   const info = await getUpdateManagerInfo();
   if (!info.repositoryWebUrl) return false;
   await shell.openExternal(info.repositoryWebUrl);
   return true;
-});
+}));
 
-ipcMain.handle("updates:open-index", async () => {
+ipcMain.handle("updates:open-index", withUserFacingError("updates:open-index", "更新记录暂时无法打开。", async () => {
   const info = await getUpdateManagerInfo();
   await shell.openPath(info.updateIndexPath);
-});
+}));
 
-ipcMain.handle("updates:open-release-dir", async () => {
+ipcMain.handle("updates:open-release-dir", withUserFacingError("updates:open-release-dir", "安装包目录暂时无法打开。", async () => {
   const info = await getUpdateManagerInfo();
   await shell.openPath(info.releaseDir);
-});
+}));
 
-ipcMain.handle("updates:check", () => checkForUpdates());
+ipcMain.handle("updates:check", withUserFacingError("updates:check", "更新检测没有完成，请稍后再试。", () => checkForUpdates()));
 
-ipcMain.handle("updates:download", (_event, downloadUrl: unknown) => downloadUpdate(downloadUrl));
+ipcMain.handle("updates:download", withUserFacingError("updates:download", "安装包下载没有完成，请稍后再试。", (_event, downloadUrl) => downloadUpdate(downloadUrl)));
 
-ipcMain.handle("updates:install", (_event, filePath: unknown) => installUpdate(filePath));
+ipcMain.handle("updates:install", withUserFacingError("updates:install", "安装程序没有启动，请稍后再试。", (_event, filePath) => installUpdate(filePath)));
 
-ipcMain.handle("updates:open-release-page", async (_event, releaseUrl: unknown) => {
+ipcMain.handle("updates:open-release-page", withUserFacingError("updates:open-release-page", "发布页面暂时无法打开。", async (_event, releaseUrl) => {
   if (typeof releaseUrl !== "string" || !releaseUrl.startsWith("https://")) return false;
   await shell.openExternal(releaseUrl);
   return true;
-});
+}));

@@ -30,6 +30,7 @@ Do not make one large course JSON blob the only source of truth once MySQL persi
 Electron main
   - window lifecycle
   - app paths
+  - reusable data root
   - MySQL connection
   - local asset storage
   - import/export
@@ -39,6 +40,7 @@ Electron main
 React renderer
   - left navigation
   - course list
+  - course section feature UI
   - mind-map workspace
   - document workspace
   - toolbar UI
@@ -46,6 +48,7 @@ React renderer
 
 Domain layer
   - course normalization
+  - course command contracts
   - mind-map node indexing
   - branch-map reconciliation
   - document-node linking
@@ -141,15 +144,19 @@ assets
   mime_type
   byte_size
   created_at
+  updated_at
+  deleted_at
 
 knowledge_asset_links
   id
+  asset_id
   course_id
+  mind_map_id
   node_id
   document_id
-  asset_id
   relation_type
   created_at
+  deleted_at
 ```
 
 ## Snapshot Policy
@@ -170,6 +177,7 @@ Word-like documents:
 - Track snapshot byte sizes and prevent growth through hash reuse, snapshot retention, and asset extraction rather than renderer memory limits.
 - Store images and attachments in `assets`, not inside JSON payloads.
 - Hash assets by SHA-256 to avoid duplicates.
+- Store asset references in `knowledge_asset_links`; `document_id` uses an empty string for non-document scoped references so uniqueness stays enforceable in MySQL.
 
 ## Memory Policy
 
@@ -219,7 +227,19 @@ Export must read domain models through services, not scrape UI state.
 
 Renderer feature code must keep application shell state, feature UI state, editor adapters, domain model rules, and persistence services separated. The detailed implementation constraint is maintained in `docs/功能规划/底层架构分层约束.md`.
 
+Course and section management has its own implementation constraint in `docs/功能规划/课程分区架构收口.md`. New course/sidebar work must use command-style IPC and the `src/renderer/features/course/` boundary instead of adding more state and full-store writes to `main.tsx`.
+
+Course MySQL failures must degrade to the light local mirror and pending operation replay, not to a second independent course database. The pending queue is limited to course and section index commands so it cannot grow through editor snapshots or assets.
+
+Course and section drag sorting must use `courses:reorder` and `course-sections:reorder`; renderer code must not rewrite the full course store to express ordering changes.
+
+Local mirror files that support this recovery path must be written atomically and quarantined when unreadable. A broken mirror or pending file must not block startup or turn into a hidden source of truth.
+
+Raw implementation errors must stay out of product pages. IPC handlers return user-facing messages, while the main process stores technical details in the MySQL-backed error log service. Settings owns the user-readable error log page.
+
 Word detail storage has its own implementation constraint in `docs/功能规划/Word详细内容存储约束.md`. That contract is stricter than the early architecture sketch: Word content belongs to `knowledge_document_snapshots`, while `knowledge_documents` is only the node-level current pointer and strong index.
+
+Reusable deployment rules are tracked in `docs/功能规划/开箱即用与外部接入规划.md`. Runtime files should converge under `AIstudyData`; external integrations such as MySQL, Chrome ports, AI web sessions, and GitHub updates must degrade without blocking the core workspace.
 
 ## First Implementation Milestone
 

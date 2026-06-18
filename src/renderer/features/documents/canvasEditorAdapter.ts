@@ -197,7 +197,7 @@ function normalizeSnapshot(value: unknown): KnowledgeDocumentSnapshot {
   if (value && typeof value === "object") {
     const candidate = value as Partial<KnowledgeDocumentSnapshot>;
     return {
-      schemaVersion: 1,
+      schemaVersion: AISTUDY_CORE_CONTRACT.schemaVersion,
       editor: DOCUMENT_EDITOR,
       editorVersion: typeof candidate.editorVersion === "string" ? candidate.editorVersion : DOCUMENT_EDITOR_VERSION,
       content: normalizeEditorData(candidate.content as KnowledgeDocumentContent | undefined) as KnowledgeDocumentContent,
@@ -210,7 +210,7 @@ function normalizeSnapshot(value: unknown): KnowledgeDocumentSnapshot {
 
 export function createEmptyKnowledgeDocumentSnapshot(): KnowledgeDocumentSnapshot {
   return {
-    schemaVersion: 1,
+    schemaVersion: AISTUDY_CORE_CONTRACT.schemaVersion,
     editor: DOCUMENT_EDITOR,
     editorVersion: DOCUMENT_EDITOR_VERSION,
     content: {
@@ -223,7 +223,7 @@ export function createEmptyKnowledgeDocumentSnapshot(): KnowledgeDocumentSnapsho
 function toSnapshot(editor: CanvasEditorInstance): KnowledgeDocumentSnapshot {
   const value = editor.command.getValue();
   return {
-    schemaVersion: 1,
+    schemaVersion: AISTUDY_CORE_CONTRACT.schemaVersion,
     editor: DOCUMENT_EDITOR,
     editorVersion: DOCUMENT_EDITOR_VERSION,
     content: normalizeEditorData(value.data) as KnowledgeDocumentContent,

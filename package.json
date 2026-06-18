@@ -1,6 +1,6 @@
 {
   "name": "aistudy",
-  "version": "0.1.7",
+  "version": "0.1.14",
   "description": "AIstudy desktop shell.",
   "author": "SnowLove0303",
   "private": true,
@@ -13,12 +13,16 @@
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
     "build": "tsc && vite build && node scripts/build/prepare-renderer-vendors.mjs && tsc -p tsconfig.electron.json",
+    "qa:error-codes": "npm run build && node scripts/qa/validate-error-codes.mjs",
     "pack": "npm run build && electron-builder --dir --config.electronDist=node_modules/electron/dist",
     "dist": "npm run build && electron-builder --win nsis --config.electronDist=node_modules/electron/dist",
     "dist:oneclick": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package/close-and-dist.ps1",
+    "import:docx": "node scripts/importers/import-docx-to-node-documents.mjs",
+    "audit:docx-import": "node scripts/importers/audit-docx-import.mjs",
     "update:record": "node scripts/update/record-update.mjs"
   },
   "dependencies": {
+    "jszip": "^3.10.1",
     "mysql2": "^3.22.5"
   },
   "devDependencies": {

@@ -4,6 +4,8 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectRoot = Resolve-Path (Join-Path $scriptDir "..\..")
 $releaseRoot = Join-Path $projectRoot "release"
 $releasePrefix = (Join-Path $projectRoot "release-").ToLowerInvariant()
+$portableDataDir = Join-Path $releaseRoot "win-unpacked\AIstudyData"
+$preservedDataDir = Join-Path $projectRoot ".tmp\packaging-preserve\AIstudyData"
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $OutputEncoding
 try {
@@ -56,6 +58,51 @@ function Test-IsProjectBuildProcess {
     $normalized.StartsWith($releasePrefix)
 }
 
+function Save-PortableRuntimeData {
+  $portableFullPath = [System.IO.Path]::GetFullPath($portableDataDir)
+  $releaseFullPath = [System.IO.Path]::GetFullPath($releaseRoot)
+  if (-not $portableFullPath.StartsWith($releaseFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to preserve path outside release: $portableFullPath"
+  }
+
+  if (-not (Test-Path -LiteralPath $portableFullPath)) {
+    return
+  }
+
+  $preservedFullPath = [System.IO.Path]::GetFullPath($preservedDataDir)
+  $tmpRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot ".tmp"))
+  if (-not $preservedFullPath.StartsWith($tmpRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to preserve data outside project .tmp: $preservedFullPath"
+  }
+
+  if (Test-Path -LiteralPath $preservedFullPath) {
+    Remove-Item -LiteralPath $preservedFullPath -Recurse -Force
+  }
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $preservedFullPath) | Out-Null
+  Move-Item -LiteralPath $portableFullPath -Destination $preservedFullPath
+  Write-Host "[AIstudy] Preserved portable runtime data."
+}
+
+function Restore-PortableRuntimeData {
+  $preservedFullPath = [System.IO.Path]::GetFullPath($preservedDataDir)
+  if (-not (Test-Path -LiteralPath $preservedFullPath)) {
+    return
+  }
+
+  $portableFullPath = [System.IO.Path]::GetFullPath($portableDataDir)
+  $releaseFullPath = [System.IO.Path]::GetFullPath($releaseRoot)
+  if (-not $portableFullPath.StartsWith($releaseFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to restore path outside release: $portableFullPath"
+  }
+
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $portableFullPath) | Out-Null
+  if (Test-Path -LiteralPath $portableFullPath) {
+    Remove-Item -LiteralPath $portableFullPath -Recurse -Force
+  }
+  Move-Item -LiteralPath $preservedFullPath -Destination $portableFullPath
+  Write-Host "[AIstudy] Restored portable runtime data."
+}
+
 Set-Location $projectRoot
 $packageJson = Get-Content -LiteralPath (Join-Path $projectRoot "package.json") -Raw | ConvertFrom-Json
 $appVersion = [string] $packageJson.version
@@ -78,6 +125,7 @@ if ($oldProcesses) {
 }
 
 Write-Host "[AIstudy] Cleaning stale packaging artifacts..."
+Save-PortableRuntimeData
 Remove-BuildArtifact (Join-Path $releaseRoot "win-unpacked")
 Remove-BuildArtifact (Join-Path $releaseRoot ("aistudy-{0}-x64.nsis.7z" -f $appVersion))
 
@@ -109,8 +157,10 @@ if ($exitCode -ne 0) {
 
   if ($exitCode -ne 0) {
     Write-Host "[AIstudy] Packaging failed with exit code $exitCode."
+    Restore-PortableRuntimeData
     exit $exitCode
   }
 }
 
+Restore-PortableRuntimeData
 Write-Host ("[AIstudy] Done: release\AIstudy-Setup-{0}.exe" -f $appVersion)

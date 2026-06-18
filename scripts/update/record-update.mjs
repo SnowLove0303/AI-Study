@@ -92,6 +92,24 @@ function prependEntry(content, entryLines) {
   return `${content.trimEnd()}\n\n## 更新记录\n\n${entryLines.join("\n")}`;
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function removeVersionEntries(content, version) {
+  const marker = "## 更新记录";
+  const markerIndex = content.indexOf(marker);
+  if (markerIndex === -1) return content;
+
+  const beforeEntries = content.slice(0, markerIndex + marker.length);
+  const entries = content.slice(markerIndex + marker.length);
+  const versionPattern = new RegExp(
+    `\\n{0,2}### ${escapeRegExp(version)} - [^\\n]+\\n[\\s\\S]*?(?=\\n### |\\s*$)`,
+    "g"
+  );
+  return `${beforeEntries}${entries.replace(versionPattern, "")}`;
+}
+
 ensureUpdateDirectory();
 
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
@@ -128,7 +146,8 @@ const entryLines = [
 const current = fs.existsSync(updateIndexPath) ? fs.readFileSync(updateIndexPath, "utf8") : createEmptyIndex();
 
 const withLatest = replaceLatestSection(current.trim() ? current : createEmptyIndex(), latestLines);
-const next = prependEntry(withLatest, entryLines);
+const withoutDuplicateVersion = removeVersionEntries(withLatest, version);
+const next = prependEntry(withoutDuplicateVersion, entryLines);
 
 fs.writeFileSync(updateIndexPath, `${next.trimEnd()}\n`, "utf8");
 console.log(`[AIstudy] Update index recorded: ${version} ${updatedAt}`);

@@ -1,7 +1,7 @@
 import { AISTUDY_CORE_CONTRACT } from "../../domain/coreContracts";
 import type { MindMapLayoutType, MindMapOutlineItem, MindMapSnapshot, SimpleMindMapNode } from "./mindMapTypes";
 
-const EDITOR_VERSION = "0.14.0-fix.2";
+export const MIND_MAP_EDITOR_VERSION = "0.14.0-fix.2";
 export const RIGHT_BRANCH_LAYOUT: MindMapLayoutType = AISTUDY_CORE_CONTRACT.mindMap.defaultLayout;
 export const MIND_MAP_DEFAULT_FONT_SIZE = AISTUDY_CORE_CONTRACT.mindMap.defaultFontSize;
 const DEFAULT_THEME = "default";
@@ -142,7 +142,7 @@ export function createInitialSnapshot(title: string): MindMapSnapshot {
   return {
     schemaVersion: AISTUDY_CORE_CONTRACT.schemaVersion,
     editor: AISTUDY_CORE_CONTRACT.editors.mindMap,
-    editorVersion: EDITOR_VERSION,
+    editorVersion: MIND_MAP_EDITOR_VERSION,
     root: createRootNode(title),
     layout: RIGHT_BRANCH_LAYOUT,
     theme: createDefaultTheme(),
@@ -168,7 +168,7 @@ export function normalizeSnapshot(value: unknown, fallbackTitle: string): MindMa
   return {
     schemaVersion: AISTUDY_CORE_CONTRACT.schemaVersion,
     editor: AISTUDY_CORE_CONTRACT.editors.mindMap,
-    editorVersion: typeof candidate.editorVersion === "string" ? candidate.editorVersion : EDITOR_VERSION,
+    editorVersion: typeof candidate.editorVersion === "string" ? candidate.editorVersion : MIND_MAP_EDITOR_VERSION,
     root: normalizeMindMapTree(candidate.root, fallbackTitle),
     layout: sourceLayout,
     theme: createDefaultTheme(),

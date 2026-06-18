@@ -6,10 +6,15 @@ export const AISTUDY_CORE_CONTRACT = Object.freeze({
   },
   mindMap: {
     defaultLayout: "logicalStructure",
-    snapshotRetentionLimit: 12
+    snapshotRetentionLimit: 12,
+    maxSnapshotBytes: 5 * 1024 * 1024
   },
   knowledgeDocument: {
-    snapshotRetentionLimit: 16
+    snapshotRetentionLimit: 16,
+    maxSnapshotBytes: 2 * 1024 * 1024
+  },
+  storage: {
+    maxInlineDataUrlBytes: 2 * 1024
   },
   identity: {
     entityIdMaxLength: 64,
@@ -17,4 +22,3 @@ export const AISTUDY_CORE_CONTRACT = Object.freeze({
     pattern: /^[A-Za-z0-9:_-]+$/
   }
 } as const);
-

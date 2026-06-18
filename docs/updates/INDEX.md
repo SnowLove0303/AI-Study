@@ -4,14 +4,80 @@
 
 ## 最新版本
 
-- 版本号：0.1.7
-- 更新时间：2026-06-16 23:47:02
-- 功能更新：修复课程读取失败时的空白列表；课程数据改为 MySQL 与本地 courses.json 双保险
+- 版本号：0.1.14
+- 更新时间：2026-06-18 21:16:26
+- 功能更新：修正 ChatGPT 分片会话 cookie 识别，并保护打包版 AIstudyData 运行数据不被打包清理删除
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：feature/core-logic-freeze-20260616
-- 提交：63304a8f
+- 提交：fb508600
 
 ## 更新记录
+
+### 0.1.14 - 2026-06-18 21:16:26
+
+- 修正 ChatGPT 分片会话 cookie 识别，并保护打包版 AIstudyData 运行数据不被打包清理删除
+- GitHub：https://github.com/SnowLove0303/AI-Study.git
+- 分支：feature/core-logic-freeze-20260616
+- 提交：fb508600
+
+### 0.1.13 - 2026-06-18 03:35:01
+
+- 优化左侧分区和课程列表字体
+- 分区与课程标题改用微软雅黑并放大显示
+- GitHub：https://github.com/SnowLove0303/AI-Study.git
+- 分支：feature/core-logic-freeze-20260616
+- 提交：fb508600
+
+
+### 0.1.12 - 2026-06-18 03:31:27
+
+- 新增课程保存状态提示
+- 断网或数据库不可用时显示已在本机保存
+- 同步失败时提供再试一次
+- GitHub：https://github.com/SnowLove0303/AI-Study.git
+- 分支：feature/core-logic-freeze-20260616
+- 提交：fb508600
+
+
+### 0.1.11 - 2026-06-18 03:23:45
+
+- 补课程分区本地镜像原子写入
+- 损坏 courses/pending 文件自动隔离
+- 完成 MySQL 断连恢复模拟验证
+- GitHub：https://github.com/SnowLove0303/AI-Study.git
+- 分支：feature/core-logic-freeze-20260616
+- 提交：fb508600
+
+
+### 0.1.10 - 2026-06-18 03:10:21
+
+- 补课程分区离线操作队列
+- MySQL 恢复后自动重放本地课程/分区变更
+- 完善课程分区可靠性文档
+- GitHub：https://github.com/SnowLove0303/AI-Study.git
+- 分支：feature/core-logic-freeze-20260616
+- 提交：fb508600
+
+
+### 0.1.9 - 2026-06-18 02:38:53
+
+- 改为 Notion 式左侧树状分区
+- 课程移动改为更多菜单
+- 未分区支持折叠
+- GitHub：https://github.com/SnowLove0303/AI-Study.git
+- 分支：feature/core-logic-freeze-20260616
+- 提交：fb508600
+
+
+### 0.1.8 - 2026-06-18 02:03:04
+
+- 新增知识库分区管理
+- 支持课程移入分区与未分区
+- 补充分区 MySQL 配置、建表和迁移文档
+- GitHub：https://github.com/SnowLove0303/AI-Study.git
+- 分支：feature/core-logic-freeze-20260616
+- 提交：fb508600
+
 
 ### 0.1.7 - 2026-06-16 23:47:02
 
