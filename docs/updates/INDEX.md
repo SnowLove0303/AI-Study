@@ -5,20 +5,22 @@
 ## 最新版本
 
 - 版本号：0.1.14
-- 更新时间：2026-06-18 21:16:26
-- 功能更新：修正 ChatGPT 分片会话 cookie 识别，并保护打包版 AIstudyData 运行数据不被打包清理删除
+- 更新时间：2026-06-18 21:40:23
+- 功能更新：自用版改为跟随公开版 Release 更新；保持 AIstudyData 和 MySQL 数据库独立；打包时关闭运行数据绑定的浏览器进程
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：feature/core-logic-freeze-20260616
-- 提交：fb508600
+- 提交：78fbcd71
 
 ## 更新记录
 
-### 0.1.14 - 2026-06-18 21:16:26
+### 0.1.14 - 2026-06-18 21:40:23
 
-- 修正 ChatGPT 分片会话 cookie 识别，并保护打包版 AIstudyData 运行数据不被打包清理删除
+- 自用版改为跟随公开版 Release 更新
+- 保持 AIstudyData 和 MySQL 数据库独立
+- 打包时关闭运行数据绑定的浏览器进程
 - GitHub：https://github.com/SnowLove0303/AI-Study.git
 - 分支：feature/core-logic-freeze-20260616
-- 提交：fb508600
+- 提交：78fbcd71
 
 ### 0.1.13 - 2026-06-18 03:35:01
 

@@ -58,6 +58,37 @@ function Test-IsProjectBuildProcess {
     $normalized.StartsWith($releasePrefix)
 }
 
+function Stop-ProjectRuntimeProcesses {
+  param([string] $RuntimePath)
+
+  $runtimeFullPath = [System.IO.Path]::GetFullPath($RuntimePath).ToLowerInvariant()
+  $currentProcessId = $PID
+  $runtimeProcesses = Get-CimInstance Win32_Process | Where-Object {
+    $commandLine = [string] $_.CommandLine
+    if ([string]::IsNullOrWhiteSpace($commandLine)) {
+      return $false
+    }
+    if ([int] $_.ProcessId -eq $currentProcessId) {
+      return $false
+    }
+    return $commandLine.ToLowerInvariant().Contains($runtimeFullPath)
+  }
+
+  if (-not $runtimeProcesses) {
+    return
+  }
+
+  foreach ($runtimeProcess in $runtimeProcesses) {
+    Write-Host ("[AIstudy] Stop runtime PID {0}: {1}" -f $runtimeProcess.ProcessId, $runtimeProcess.Name)
+    try {
+      Stop-Process -Id $runtimeProcess.ProcessId -Force -ErrorAction Stop
+    } catch [Microsoft.PowerShell.Commands.ProcessCommandException] {
+      Write-Host ("[AIstudy] Runtime PID {0} already exited." -f $runtimeProcess.ProcessId)
+    }
+  }
+  Start-Sleep -Milliseconds 800
+}
+
 function Save-PortableRuntimeData {
   $portableFullPath = [System.IO.Path]::GetFullPath($portableDataDir)
   $releaseFullPath = [System.IO.Path]::GetFullPath($releaseRoot)
@@ -124,43 +155,43 @@ if ($oldProcesses) {
   Write-Host "[AIstudy] No old packaged app instance found."
 }
 
-Write-Host "[AIstudy] Cleaning stale packaging artifacts..."
-Save-PortableRuntimeData
-Remove-BuildArtifact (Join-Path $releaseRoot "win-unpacked")
-Remove-BuildArtifact (Join-Path $releaseRoot ("aistudy-{0}-x64.nsis.7z" -f $appVersion))
+try {
+  Write-Host "[AIstudy] Cleaning stale packaging artifacts..."
+  Stop-ProjectRuntimeProcesses $portableDataDir
+  Save-PortableRuntimeData
+  Remove-BuildArtifact (Join-Path $releaseRoot "win-unpacked")
+  Remove-BuildArtifact (Join-Path $releaseRoot ("aistudy-{0}-x64.nsis.7z" -f $appVersion))
 
-if ([string]::IsNullOrWhiteSpace($env:AISTUDY_UPDATE_SUMMARY)) {
-  $env:AISTUDY_UPDATE_SUMMARY = "一键打包生成安装包"
+  Write-Host "[AIstudy] Recording update index..."
+  & npm.cmd run update:record
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "[AIstudy] Update index failed with exit code $LASTEXITCODE."
+    $exitCode = $LASTEXITCODE
+  } else {
+    Write-Host "[AIstudy] Building installer..."
+    & npm.cmd run dist
+    $exitCode = $LASTEXITCODE
+
+    if ($exitCode -ne 0) {
+      $prepackagedDir = Join-Path $releaseRoot "win-unpacked"
+      $prepackagedExe = Join-Path $prepackagedDir "AIstudy.exe"
+
+      if (Test-Path -LiteralPath $prepackagedExe) {
+        Write-Host "[AIstudy] Standard packaging failed after win-unpacked was created."
+        Write-Host "[AIstudy] Retrying installer build from prepackaged app..."
+        & npx.cmd electron-builder --win nsis --prepackaged $prepackagedDir
+        $exitCode = $LASTEXITCODE
+      }
+    }
+  }
+} finally {
+  Stop-ProjectRuntimeProcesses $portableDataDir
+  Restore-PortableRuntimeData
 }
-
-Write-Host "[AIstudy] Recording update index..."
-& npm.cmd run update:record
-if ($LASTEXITCODE -ne 0) {
-  Write-Host "[AIstudy] Update index failed with exit code $LASTEXITCODE."
-  exit $LASTEXITCODE
-}
-
-Write-Host "[AIstudy] Building installer..."
-& npm.cmd run dist
-$exitCode = $LASTEXITCODE
 
 if ($exitCode -ne 0) {
-  $prepackagedDir = Join-Path $releaseRoot "win-unpacked"
-  $prepackagedExe = Join-Path $prepackagedDir "AIstudy.exe"
-
-  if (Test-Path -LiteralPath $prepackagedExe) {
-    Write-Host "[AIstudy] Standard packaging failed after win-unpacked was created."
-    Write-Host "[AIstudy] Retrying installer build from prepackaged app..."
-    & npx.cmd electron-builder --win nsis --prepackaged $prepackagedDir
-    $exitCode = $LASTEXITCODE
-  }
-
-  if ($exitCode -ne 0) {
-    Write-Host "[AIstudy] Packaging failed with exit code $exitCode."
-    Restore-PortableRuntimeData
-    exit $exitCode
-  }
+  Write-Host "[AIstudy] Packaging failed with exit code $exitCode."
+  exit $exitCode
 }
 
-Restore-PortableRuntimeData
 Write-Host ("[AIstudy] Done: release\AIstudy-Setup-{0}.exe" -f $appVersion)
