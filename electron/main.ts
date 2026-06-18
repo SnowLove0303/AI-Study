@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, ipcMain, net, shell, type IpcMainInvokeEvent } from "electron";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -18,6 +18,10 @@ const MIND_MAP_SNAPSHOT_RETENTION_LIMIT = AISTUDY_CORE_CONTRACT.mindMap.snapshot
 const KNOWLEDGE_DOCUMENT_SNAPSHOT_RETENTION_LIMIT = AISTUDY_CORE_CONTRACT.knowledgeDocument.snapshotRetentionLimit;
 const BEFORE_CLOSE_DRAIN_TIMEOUT_MS = 2500;
 const INLINE_DATA_URL_PATTERN = /^data:[^;,]+(?:;[^,]+)*;base64,/i;
+const UPDATE_DOWNLOAD_CHUNK_SIZE_BYTES = 1024 * 1024;
+const UPDATE_DOWNLOAD_RETRY_LIMIT = 4;
+const UPDATE_DOWNLOAD_NET_TIMEOUT_MS = 120000;
+const UPDATE_DOWNLOAD_PROGRESS_POLL_MS = 500;
 
 type CourseRecord = {
   id: string;
@@ -402,6 +406,14 @@ type UpdateDownloadResult = {
   filePath: string;
   fileName: string;
   fileSize: number;
+};
+
+type UpdateDownloadProgress = {
+  fileName: string;
+  downloadedBytes: number;
+  totalBytes: number;
+  percent: number;
+  status: "starting" | "downloading" | "complete";
 };
 
 type RuntimeDiagnosticStatus = "ok" | "warning" | "error" | "disabled";
@@ -2989,7 +3001,7 @@ async function fetchJsonWithTimeout(url: string, timeoutMs: number) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, {
+    return await net.fetch(url, {
       signal: controller.signal,
       headers: {
         Accept: "application/vnd.github+json",
@@ -3207,7 +3219,7 @@ async function fetchLatestRelease(): Promise<GitHubRelease> {
     throw new Error("未配置有效的 GitHub 仓库地址。");
   }
 
-  const response = await fetch(`https://api.github.com/repos/${repository.owner}/${repository.repo}/releases/latest`, {
+  const response = await net.fetch(`https://api.github.com/repos/${repository.owner}/${repository.repo}/releases/latest`, {
     headers: {
       Accept: "application/vnd.github+json",
       "User-Agent": "AIstudy-Updater"
@@ -3251,7 +3263,125 @@ async function checkForUpdates(): Promise<UpdateCheckResult> {
   };
 }
 
-async function downloadUpdate(downloadUrlValue: unknown): Promise<UpdateDownloadResult> {
+function sendUpdateDownloadProgress(event: IpcMainInvokeEvent, progress: UpdateDownloadProgress) {
+  if (!event.sender.isDestroyed()) {
+    event.sender.send("updates:download-progress", progress);
+  }
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getContentRangeTotal(contentRange: string | null) {
+  const match = contentRange?.match(/\/(\d+)\s*$/);
+  return match ? Number(match[1]) : 0;
+}
+
+async function fetchUpdateDownloadRange(downloadUrlValue: string, startByte: number, endByte?: number) {
+  const rangeValue = typeof endByte === "number" ? `bytes=${startByte}-${endByte}` : `bytes=${startByte}-`;
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= UPDATE_DOWNLOAD_RETRY_LIMIT; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), UPDATE_DOWNLOAD_NET_TIMEOUT_MS);
+    try {
+      const response = await net.fetch(downloadUrlValue, {
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "AIstudy-Updater",
+          Range: rangeValue
+        }
+      });
+
+      if (response.status === 206 || (startByte === 0 && response.ok)) {
+        return response;
+      }
+
+      lastError = new Error(`下载安装包失败：${response.status}`);
+    } catch (error) {
+      lastError = error;
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    await wait(600 * attempt);
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("下载安装包失败。");
+}
+
+function runCurlDownload(downloadUrlValue: string, tempFilePath: string) {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn("curl.exe", [
+      "-L",
+      "--fail",
+      "--retry",
+      String(UPDATE_DOWNLOAD_RETRY_LIMIT),
+      "--retry-all-errors",
+      "--connect-timeout",
+      "20",
+      "--output",
+      tempFilePath,
+      downloadUrlValue
+    ], {
+      windowsHide: true
+    });
+    let stderr = "";
+
+    child.stderr?.on("data", (chunk) => {
+      stderr = `${stderr}${String(chunk)}`.slice(-1000);
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(stderr.trim() || "下载安装包失败。"));
+    });
+  });
+}
+
+async function downloadUpdateWithCurl(
+  event: IpcMainInvokeEvent,
+  downloadUrlValue: string,
+  fileName: string,
+  tempFilePath: string,
+  expectedTotalBytes: number
+) {
+  let finished = false;
+  const progressTimer = setInterval(() => {
+    void fs.stat(tempFilePath)
+      .then((stat) => {
+        sendUpdateDownloadProgress(event, {
+          fileName,
+          downloadedBytes: stat.size,
+          totalBytes: expectedTotalBytes,
+          percent: expectedTotalBytes > 0 ? Math.min(100, Math.round((stat.size / expectedTotalBytes) * 100)) : 0,
+          status: finished ? "complete" : "downloading"
+        });
+      })
+      .catch(() => undefined);
+  }, UPDATE_DOWNLOAD_PROGRESS_POLL_MS);
+
+  try {
+    await runCurlDownload(downloadUrlValue, tempFilePath);
+    finished = true;
+    const stat = await fs.stat(tempFilePath);
+    sendUpdateDownloadProgress(event, {
+      fileName,
+      downloadedBytes: stat.size,
+      totalBytes: expectedTotalBytes || stat.size,
+      percent: 100,
+      status: "complete"
+    });
+  } finally {
+    clearInterval(progressTimer);
+  }
+}
+
+async function downloadUpdate(event: IpcMainInvokeEvent, downloadUrlValue: unknown, expectedSizeValue: unknown): Promise<UpdateDownloadResult> {
   if (typeof downloadUrlValue !== "string" || !downloadUrlValue.startsWith("https://")) {
     throw new Error("下载地址不可用。");
   }
@@ -3260,25 +3390,107 @@ async function downloadUpdate(downloadUrlValue: unknown): Promise<UpdateDownload
   const fileName = decodeURIComponent(path.basename(url.pathname)) || `AIstudy-Setup-${app.getVersion()}.exe`;
   const updateDir = getAistudyDataPath("updates");
   const filePath = path.join(updateDir, fileName);
+  const tempFilePath = path.join(updateDir, `${fileName}.${randomUUID()}.download`);
+  const expectedTotalBytes = typeof expectedSizeValue === "number" && Number.isFinite(expectedSizeValue) ? Math.max(0, expectedSizeValue) : 0;
   await fs.mkdir(updateDir, { recursive: true });
 
-  const response = await fetch(downloadUrlValue, {
-    headers: {
-      "User-Agent": "AIstudy-Updater"
-    }
+  sendUpdateDownloadProgress(event, {
+    fileName,
+    downloadedBytes: 0,
+    totalBytes: 0,
+    percent: 0,
+    status: "starting"
   });
 
-  if (!response.ok) {
-    throw new Error(`下载安装包失败：${response.status}`);
+  if (process.platform === "win32") {
+    try {
+      await downloadUpdateWithCurl(event, downloadUrlValue, fileName, tempFilePath, expectedTotalBytes);
+      await fs.rm(filePath, { force: true }).catch(() => undefined);
+      await fs.rename(tempFilePath, filePath);
+      const downloadedFile = await fs.stat(filePath);
+      return {
+        filePath,
+        fileName,
+        fileSize: downloadedFile.size
+      };
+    } catch {
+      await fs.rm(tempFilePath, { force: true }).catch(() => undefined);
+    }
   }
 
-  const buffer = Buffer.from(await response.arrayBuffer());
-  await fs.writeFile(filePath, buffer);
+  let downloadedBytes = 0;
+  let totalBytes = 0;
+  let lastProgressAt = 0;
+  const fileHandle = await fs.open(tempFilePath, "w");
+  try {
+    while (totalBytes === 0 || downloadedBytes < totalBytes) {
+      const rangeEnd = totalBytes > 0
+        ? Math.min(downloadedBytes + UPDATE_DOWNLOAD_CHUNK_SIZE_BYTES - 1, totalBytes - 1)
+        : downloadedBytes + UPDATE_DOWNLOAD_CHUNK_SIZE_BYTES - 1;
+      const response = await fetchUpdateDownloadRange(downloadUrlValue, downloadedBytes, rangeEnd);
+      const contentRangeTotal = getContentRangeTotal(response.headers.get("content-range"));
+      if (contentRangeTotal > 0) {
+        totalBytes = contentRangeTotal;
+      } else if (response.status === 206) {
+        throw new Error("下载安装包失败：下载源没有返回完整文件大小。");
+      } else if (totalBytes === 0) {
+        totalBytes = Number(response.headers.get("content-length")) || 0;
+      }
+
+      const bodyReader = response.body?.getReader();
+      if (!bodyReader) {
+        throw new Error("下载安装包失败：没有收到文件内容。");
+      }
+
+      while (true) {
+        const { done, value } = await bodyReader.read();
+        if (done) break;
+        if (!value) continue;
+
+        const chunk = Buffer.from(value);
+        await fileHandle.write(chunk);
+        downloadedBytes += chunk.byteLength;
+
+        const now = Date.now();
+        if (now - lastProgressAt > 160 || (totalBytes > 0 && downloadedBytes >= totalBytes)) {
+          lastProgressAt = now;
+          sendUpdateDownloadProgress(event, {
+            fileName,
+            downloadedBytes,
+            totalBytes,
+            percent: totalBytes > 0 ? Math.min(100, Math.round((downloadedBytes / totalBytes) * 100)) : 0,
+            status: "downloading"
+          });
+        }
+      }
+
+      if (totalBytes === 0) {
+        totalBytes = downloadedBytes;
+      }
+    }
+  } catch (error) {
+    await fs.rm(tempFilePath, { force: true }).catch(() => undefined);
+    throw error;
+  } finally {
+    await fileHandle.close();
+  }
+
+  await fs.rm(filePath, { force: true }).catch(() => undefined);
+  await fs.rename(tempFilePath, filePath);
+  const downloadedFile = await fs.stat(filePath);
+
+  sendUpdateDownloadProgress(event, {
+    fileName,
+    downloadedBytes: downloadedFile.size,
+    totalBytes: totalBytes || downloadedFile.size,
+    percent: 100,
+    status: "complete"
+  });
 
   return {
     filePath,
     fileName,
-    fileSize: buffer.byteLength
+    fileSize: downloadedFile.size
   };
 }
 
@@ -5208,7 +5420,7 @@ ipcMain.handle("updates:open-release-dir", withUserFacingError("updates:open-rel
 
 ipcMain.handle("updates:check", withUserFacingError("updates:check", "更新检测没有完成，请稍后再试。", () => checkForUpdates()));
 
-ipcMain.handle("updates:download", withUserFacingError("updates:download", "安装包下载没有完成，请稍后再试。", (_event, downloadUrl) => downloadUpdate(downloadUrl)));
+ipcMain.handle("updates:download", withUserFacingError("updates:download", "安装包下载没有完成，请稍后再试。", (event, downloadUrl, expectedSize) => downloadUpdate(event as IpcMainInvokeEvent, downloadUrl, expectedSize)));
 
 ipcMain.handle("updates:install", withUserFacingError("updates:install", "安装程序没有启动，请稍后再试。", (_event, filePath) => installUpdate(filePath)));
 

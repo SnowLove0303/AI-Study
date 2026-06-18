@@ -94,9 +94,16 @@ contextBridge.exposeInMainWorld("aistudyUpdates", {
   openIndex: () => invokeApp("updates:open-index"),
   openReleaseDir: () => invokeApp("updates:open-release-dir"),
   check: () => invokeApp("updates:check"),
-  download: (downloadUrl: string) => invokeApp("updates:download", downloadUrl),
+  download: (downloadUrl: string, expectedSize?: number) => invokeApp("updates:download", downloadUrl, expectedSize),
   install: (filePath: string) => invokeApp("updates:install", filePath),
-  openReleasePage: (releaseUrl: string) => invokeApp("updates:open-release-page", releaseUrl)
+  openReleasePage: (releaseUrl: string) => invokeApp("updates:open-release-page", releaseUrl),
+  onDownloadProgress: (callback: (progress: unknown) => void) => {
+    const listener = (_event: IpcRendererEvent, progress: unknown) => callback(progress);
+    ipcRenderer.on("updates:download-progress", listener);
+    return () => {
+      ipcRenderer.off("updates:download-progress", listener);
+    };
+  }
 });
 
 contextBridge.exposeInMainWorld("aistudyErrorLogs", {
